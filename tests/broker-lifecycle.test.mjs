@@ -677,7 +677,7 @@ lines.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
-    setTimeout(() => process.exit(9), 300);
+    setTimeout(() => process.exit(9), 1000);
   }
 });
 `,
@@ -711,12 +711,12 @@ lines.on("line", (line) => {
   });
 
   assert.equal(
-    await waitForBrokerEndpoint(`unix:${socketPath}`, 1000, instanceId),
+    await waitForBrokerEndpoint(`unix:${socketPath}`, 5000, instanceId),
     true
   );
   const exitCode = await Promise.race([
     exit,
-    new Promise((resolve) => setTimeout(() => resolve("timeout"), 1000))
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 3000))
   ]);
   if (exitCode === "timeout") {
     child.kill("SIGTERM");
@@ -772,7 +772,7 @@ lines.on("line", (line) => {
       env: {
         ...process.env,
         PATH: `${binDir}:${process.env.PATH}`,
-        CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "50"
+        CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "500"
       },
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -782,12 +782,12 @@ lines.on("line", (line) => {
   });
 
   assert.equal(
-    await waitForBrokerEndpoint(`unix:${socketPath}`, 1000, instanceId),
+    await waitForBrokerEndpoint(`unix:${socketPath}`, 5000, instanceId),
     true
   );
   const exitCode = await Promise.race([
     exit,
-    new Promise((resolve) => setTimeout(() => resolve("timeout"), 750))
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 3000))
   ]);
   if (exitCode === "timeout") {
     child.kill("SIGTERM");

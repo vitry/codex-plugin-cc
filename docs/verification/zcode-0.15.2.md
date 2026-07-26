@@ -59,6 +59,7 @@ development plugin before reinstalling gives a deterministic refresh.
 | Stop enabled/block | After an edit introduced invalid JavaScript and the previous host response identified that edit, the hook emitted `decision: block` with the syntax defect. | Pass |
 | Stop enabled/allow | After fixing the syntax defect, the hook emitted no block decision and exited successfully. | Pass |
 | Shared broker | Review and rescue used the identity-bound shared broker; final lease release acknowledged shutdown, observed exit, and finalized state. | Pass |
+| Slash-command dispatch | A headless `/codex:status --all` turn expanded the installed command, exposed the installed companion MCP tool to the model, executed the model's tool call, returned the tool result to the model, and completed the turn. | Pass |
 
 ## Automated Verification
 
@@ -97,17 +98,29 @@ both automated coverage and installed ZCode evidence:
 Claude Code packaging and commands remain covered by the original command,
 runtime, and manifest tests.
 
-## Remaining Host Prerequisite
+## Model-Driven Command Verification
 
 This machine's ZCode CLI has no explicit ZCode model provider in
-`~/.zcode/cli/config.json`. Consequently, a headless `/codex:*` prompt stops
-before command interpretation with `Model config is missing`.
+`~/.zcode/cli/config.json`. The model-driven dispatcher was therefore verified
+without changing account or user configuration: ZCode Protocol `session/create`
+received an ephemeral OpenAI-compatible `runtimeModel` pointing to a loopback
+test server with a non-secret placeholder key.
 
-This does not affect the installed plugin's MCP, Codex authentication, command
-runtime, hooks, or transfer verification above. It does prevent claiming that
-ZCode's model-driven slash-command dispatcher was exercised. Configure a ZCode
-provider, start a new session, and rerun `/codex:setup`, `/codex:review`, and
-`/codex:rescue` before final PR readiness.
+The test sent `/codex:status --all` through `session/send` and observed:
+
+1. ZCode expanded the installed command body into the model request.
+2. The request exposed 16 tools, including the installed plugin tool
+   `mcp__plugin_codex_codex__companion`.
+3. The test model called that tool with `{"command":"status","arguments":"--all"}`.
+4. ZCode executed the plugin MCP call and included its tool result in the next
+   model request.
+5. The session emitted `turn.completed` with no last error.
+
+This verifies command discovery, command expansion, model tool selection,
+plugin MCP dispatch, tool-result delivery, and turn completion independently
+of a user's Z.AI credentials.
+
+## Known Host Limitation
 
 ZCode 0.15.2 exposes no SessionEnd hook in this plugin integration. Broker
 leases therefore rely on bounded broker idle shutdown and stale-lease

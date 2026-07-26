@@ -45,8 +45,32 @@ test("explicit host kind overrides ZCode host variable detection", () => {
   assert.equal(resolveHost({ CODEX_COMPANION_HOST: "zcode", CLAUDE_SESSION_ID: "sess_c" }).kind, "zcode");
 });
 
-test("presence of any ZCode host variable selects ZCode", () => {
-  assert.equal(resolveHost({ ZCODE_PLUGIN_ROOT: "" }).kind, "zcode");
+test("blank ZCode host variables do not select ZCode", () => {
+  assert.equal(resolveHost({ ZCODE_PLUGIN_ROOT: "" }).kind, "claude");
+  assert.equal(resolveHost({ ZCODE_PLUGIN_ROOT: " \t " }).kind, "claude");
+});
+
+test("blank values are skipped throughout host precedence", () => {
+  const host = resolveHost(
+    {
+      CODEX_COMPANION_HOST: " ",
+      CODEX_COMPANION_PLUGIN_ROOT: " ",
+      ZCODE_PLUGIN_ROOT: "/zcode-plugin",
+      ZCODE_PLUGIN_DATA: "\t",
+      CLAUDE_PLUGIN_DATA: "/claude-data",
+      ZCODE_PROJECT_DIR: "",
+      CLAUDE_PROJECT_DIR: "/claude-project",
+      CODEX_COMPANION_SESSION_ID: " ",
+      ZCODE_SESSION_ID: "sess_z"
+    },
+    "/fallback"
+  );
+
+  assert.equal(host.kind, "zcode");
+  assert.equal(host.pluginRoot, "/zcode-plugin");
+  assert.equal(host.pluginDataDir, "/claude-data");
+  assert.equal(host.projectDir, "/claude-project");
+  assert.equal(host.sessionId, "sess_z");
 });
 
 test("resolveHost applies root, data, project, and session precedence", () => {

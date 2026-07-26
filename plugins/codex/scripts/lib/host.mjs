@@ -11,7 +11,7 @@ const HOSTS = {
 
 function firstValue(env, names) {
   for (const name of names) {
-    if (env[name]) {
+    if (typeof env[name] === "string" && env[name].trim()) {
       return env[name];
     }
   }
@@ -19,10 +19,15 @@ function firstValue(env, names) {
 }
 
 function resolveHostKind(env) {
-  if (env.CODEX_COMPANION_HOST === "zcode" || env.CODEX_COMPANION_HOST === "claude") {
-    return env.CODEX_COMPANION_HOST;
+  const explicitHost = typeof env.CODEX_COMPANION_HOST === "string" ? env.CODEX_COMPANION_HOST.trim() : "";
+  if (explicitHost === "zcode" || explicitHost === "claude") {
+    return explicitHost;
   }
-  return Object.keys(env).some((name) => name.startsWith("ZCODE_")) ? "zcode" : "claude";
+  return Object.entries(env).some(
+    ([name, value]) => name.startsWith("ZCODE_") && typeof value === "string" && value.trim()
+  )
+    ? "zcode"
+    : "claude";
 }
 
 export function resolveHostSessionId(env = process.env) {

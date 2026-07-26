@@ -287,6 +287,7 @@ rl.on("line", (line) => {
     switch (message.method) {
       case "initialize":
         state.capabilities = message.params.capabilities || null;
+        state.clientInfo = message.params.clientInfo || null;
         saveState(state);
         send({ id: message.id, result: { userAgent: "fake-codex-app-server" } });
         break;
@@ -312,6 +313,8 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
+        state.lastThreadStart = message.params;
+        saveState(state);
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });

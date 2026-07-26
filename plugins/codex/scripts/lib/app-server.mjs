@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
+import { resolveHostClientInfo } from "./host.mjs";
 import { terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
@@ -22,12 +23,13 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
-/** @type {ClientInfo} */
-const DEFAULT_CLIENT_INFO = {
-  title: "Codex Plugin",
-  name: "Claude Code",
-  version: PLUGIN_MANIFEST.version ?? "0.0.0"
-};
+/** @returns {ClientInfo} */
+function resolveClientInfo(env) {
+  return {
+    ...resolveHostClientInfo(env),
+    version: PLUGIN_MANIFEST.version ?? "0.0.0"
+  };
+}
 
 /** @type {InitializeCapabilities} */
 const DEFAULT_CAPABILITIES = {
@@ -223,7 +225,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     });
 
     await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+      clientInfo: this.options.clientInfo ?? resolveClientInfo(this.options.env ?? process.env),
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
     this.notify("initialized", {});
@@ -303,7 +305,7 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     });
 
     await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+      clientInfo: this.options.clientInfo ?? resolveClientInfo(this.options.env ?? process.env),
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
     this.notify("initialized", {});

@@ -40,6 +40,20 @@ test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
   }
 });
 
+test("resolveStateDir prefers injected ZCODE_PLUGIN_DATA", () => {
+  const workspace = makeTempDir();
+  const zcodePluginDataDir = makeTempDir();
+  const claudePluginDataDir = makeTempDir();
+
+  const stateDir = resolveStateDir(workspace, {
+    ZCODE_PLUGIN_DATA: zcodePluginDataDir,
+    CLAUDE_PLUGIN_DATA: claudePluginDataDir
+  });
+
+  assert.equal(stateDir.startsWith(path.join(zcodePluginDataDir, "state")), true);
+  assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
+});
+
 test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", () => {
   const workspace = makeTempDir();
   const stateFile = resolveStateFile(workspace);

@@ -83,13 +83,13 @@ const TARGETS = [
     ]
   },
   {
-    file: ".zcode-plugin/marketplace.json",
+    file: "marketplace.json",
     values: [
       {
         label: "plugins[codex].version",
-        get: (json) => findMarketplacePlugin(json, ".zcode-plugin/marketplace.json").version,
+        get: (json) => findMarketplacePlugin(json, "marketplace.json").version,
         set: (json, version) => {
-          findMarketplacePlugin(json, ".zcode-plugin/marketplace.json").version = version;
+          findMarketplacePlugin(json, "marketplace.json").version = version;
         }
       }
     ]

@@ -55,7 +55,7 @@ function makeVersionFixture() {
     name: "codex",
     version: "1.0.2"
   });
-  writeJson(path.join(root, ".zcode-plugin", "marketplace.json"), {
+  writeJson(path.join(root, "marketplace.json"), {
     name: "openai-codex",
     plugins: [
       {
@@ -84,7 +84,7 @@ test("bump-version updates every release manifest", () => {
   assert.equal(readJson(path.join(root, ".claude-plugin", "marketplace.json")).metadata.version, "1.2.3");
   assert.equal(readJson(path.join(root, ".claude-plugin", "marketplace.json")).plugins[0].version, "1.2.3");
   assert.equal(readJson(path.join(root, ".zcode-plugin", "plugin.json")).version, "1.2.3");
-  assert.equal(readJson(path.join(root, ".zcode-plugin", "marketplace.json")).plugins[0].version, "1.2.3");
+  assert.equal(readJson(path.join(root, "marketplace.json")).plugins[0].version, "1.2.3");
 });
 
 test("bump-version check mode reports stale metadata", () => {
@@ -102,5 +102,5 @@ test("bump-version check mode reports stale metadata", () => {
   assert.match(result.stderr, /plugins\/codex\/\.claude-plugin\/plugin\.json version/);
   assert.match(result.stderr, /\.claude-plugin\/marketplace\.json metadata\.version/);
   assert.match(result.stderr, /\.zcode-plugin\/plugin\.json version/);
-  assert.match(result.stderr, /\.zcode-plugin\/marketplace\.json plugins\[codex\]\.version/);
+  assert.match(result.stderr, /marketplace\.json plugins\[codex\]\.version/);
 });

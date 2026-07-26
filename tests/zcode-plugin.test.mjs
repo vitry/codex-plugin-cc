@@ -36,8 +36,9 @@ test("ZCode manifest defines the independent Codex plugin", () => {
 
 test("ZCode marketplace exposes one repository-root plugin", () => {
   const manifest = readJson(".zcode-plugin/plugin.json");
-  const marketplace = readJson(".zcode-plugin/marketplace.json");
+  const marketplace = readJson("marketplace.json");
 
+  assert.equal(fs.existsSync(path.join(ROOT, ".zcode-plugin", "marketplace.json")), false);
   assert.equal(marketplace.plugins.length, 1);
   assert.deepEqual(marketplace.plugins[0], {
     name: "codex",

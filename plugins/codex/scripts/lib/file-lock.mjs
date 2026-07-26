@@ -6,7 +6,9 @@ import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_WINDOWS_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRY_MS = 10;
+const WINDOWS_HELPER_STARTUP_GRACE_MS = 5000;
 const NATIVE_LOCK_SUFFIX = ".advisory-v2";
 const WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 const LOCK_CONTEXT = new AsyncLocalStorage();
@@ -188,7 +190,8 @@ function createWindowsMutexHelper(lockPath, timeoutMs) {
     `$deadline = [DateTime]::UtcNow.AddMilliseconds(${Math.max(1, Math.ceil(timeoutMs))})`,
     `$parentProcess = [System.Diagnostics.Process]::GetProcessById(${process.pid})`,
     "$parentStartTicks = $parentProcess.StartTime.ToUniversalTime().Ticks",
-    `$lease = @{ token = ${powershellQuote(token)}; readyFile = ${powershellQuote(readyFile)}; releaseFile = ${powershellQuote(releaseFile)}; doneFile = ${powershellQuote(doneFile)} }`,
+    "$helperProcess = [System.Diagnostics.Process]::GetCurrentProcess()",
+    `$lease = @{ token = ${powershellQuote(token)}; readyFile = ${powershellQuote(readyFile)}; releaseFile = ${powershellQuote(releaseFile)}; doneFile = ${powershellQuote(doneFile)}; helperPid = $PID; helperStartTicks = $helperProcess.StartTime.ToUniversalTime().Ticks }`,
     "try {",
     "  while ($true) {",
     "    $acquired = $false",
@@ -211,9 +214,18 @@ function createWindowsMutexHelper(lockPath, timeoutMs) {
     "      $activeLeases = @()",
     "      foreach ($existing in @($owner.leases)) {",
     "        if ([System.IO.File]::Exists([string]$existing.releaseFile)) {",
-    "          Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.readyFile)",
-    "          Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.releaseFile)",
-    "          Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.doneFile)",
+    "          $helperAlive = $true",
+    "          if ($null -ne $existing.helperPid -and $null -ne $existing.helperStartTicks) {",
+    "            try {",
+    "              $existingHelper = [System.Diagnostics.Process]::GetProcessById([int]$existing.helperPid)",
+    "              if ($existingHelper.StartTime.ToUniversalTime().Ticks -ne [long]$existing.helperStartTicks) { $helperAlive = $false }",
+    "            } catch { $helperAlive = $false }",
+    "          }",
+    "          if (-not $ownerAlive -or -not $helperAlive) {",
+    "            Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.readyFile)",
+    "            Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.releaseFile)",
+    "            Remove-Item -Force -ErrorAction SilentlyContinue ([string]$existing.doneFile)",
+    "          }",
     "        } else { $activeLeases += $existing }",
     "      }",
     "      $owner.leases = @($activeLeases)",
@@ -342,7 +354,7 @@ async function abortWindowsMutex(handle, retryMs) {
 
 function acquireWindowsLockSync(lockPath, timeoutMs, retryMs) {
   const handle = createWindowsMutexHelper(lockPath, timeoutMs);
-  const deadline = Date.now() + timeoutMs + 250;
+  const deadline = Date.now() + timeoutMs + WINDOWS_HELPER_STARTUP_GRACE_MS;
   while (!fs.existsSync(handle.readyFile)) {
     if (!processIsAlive(handle.child.pid) || Date.now() >= deadline) {
       abortWindowsMutexSync(handle, retryMs);
@@ -355,7 +367,7 @@ function acquireWindowsLockSync(lockPath, timeoutMs, retryMs) {
 
 async function acquireWindowsLock(lockPath, timeoutMs, retryMs) {
   const handle = createWindowsMutexHelper(lockPath, timeoutMs);
-  const deadline = Date.now() + timeoutMs + 250;
+  const deadline = Date.now() + timeoutMs + WINDOWS_HELPER_STARTUP_GRACE_MS;
   while (!fs.existsSync(handle.readyFile)) {
     if (!processIsAlive(handle.child.pid) || Date.now() >= deadline) {
       await abortWindowsMutex(handle, retryMs);
@@ -397,7 +409,9 @@ async function releaseWindowsLock(handle, retryMs) {
 }
 
 export function withFileLockSync(lockPath, action, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs =
+    options.timeoutMs ??
+    (process.platform === "win32" ? DEFAULT_WINDOWS_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   const activeLease = findActiveLockLease(lockPath);
   if (activeLease) {
@@ -421,7 +435,9 @@ export function withFileLockSync(lockPath, action, options = {}) {
 }
 
 export async function withFileLock(lockPath, action, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs =
+    options.timeoutMs ??
+    (process.platform === "win32" ? DEFAULT_WINDOWS_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   const activeLease = findActiveLockLease(lockPath);
   if (activeLease) {

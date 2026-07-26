@@ -145,7 +145,6 @@ export function runCompanion(input, options = {}) {
           finish(1);
         }
       }, terminationGraceMs);
-      forceKillTimer.unref?.();
     }
 
     function capture(chunks, chunk) {
@@ -189,7 +188,6 @@ export function runCompanion(input, options = {}) {
     const timeoutTimer = setTimeout(() => {
       terminate(`Companion command timed out after ${timeoutMs}ms.`);
     }, timeoutMs);
-    timeoutTimer.unref?.();
 
     child.stdout.on("data", onStdout);
     child.stderr.on("data", onStderr);

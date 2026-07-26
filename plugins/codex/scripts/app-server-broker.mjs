@@ -14,6 +14,7 @@ const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 1000;
 let cleanupFailureArtifacts = () => {};
+process.once("exit", () => cleanupFailureArtifacts());
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -109,10 +110,10 @@ async function main() {
   if (!instanceId) {
     throw new Error("Missing required --instance-id.");
   }
-  writePidFile(pidFile, instanceId);
   cleanupFailureArtifacts = () => {
     removeOwnedPidFile(pidFile, instanceId);
   };
+  writePidFile(pidFile, instanceId);
 
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
   let activeRequestSocket = null;

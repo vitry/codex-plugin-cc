@@ -6,9 +6,11 @@ import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { makeTempDir } from "./helpers.mjs";
+import * as companionRunner from "../plugins/zcode/scripts/lib/companion-runner.mjs";
 import {
   COMPANION_COMMANDS,
   runCompanion
@@ -42,7 +44,48 @@ function fakeChild({ stdout = "", stderr = "", code = 0 } = {}) {
   return child;
 }
 
-function startServer() {
+function controlledChild({ naturalCloseMs = 100 } = {}) {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killSignals = [];
+  const timer = setTimeout(() => child.emit("close", 0, null), naturalCloseMs);
+  timer.unref();
+  child.kill = (signal) => {
+    child.killSignals.push(signal);
+    clearTimeout(timer);
+    queueMicrotask(() => {
+      child.emit("error", new Error(`killed with ${signal}`));
+      child.emit("close", null, signal);
+    });
+    return true;
+  };
+  return child;
+}
+
+function makeFixturePlugin() {
+  const pluginRoot = makeTempDir("zcode-mcp-fixture-");
+  const scriptDir = path.join(pluginRoot, "plugins", "codex", "scripts");
+  fs.mkdirSync(scriptDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptDir, "codex-companion.mjs"),
+    [
+      'import fs from "node:fs";',
+      'const started = process.argv[3];',
+      'const killed = process.argv[4];',
+      'if (started) fs.appendFileSync(started, `${process.pid}\\n`);',
+      'process.on("SIGTERM", () => {',
+      '  if (killed) fs.appendFileSync(killed, `${process.pid}\\n`);',
+      '  process.exit(143);',
+      '});',
+      'setTimeout(() => process.exit(0), 250);'
+    ].join("\n"),
+    "utf8"
+  );
+  return pluginRoot;
+}
+
+function startServer(options = {}) {
   const projectDir = makeTempDir("zcode-mcp-project-");
   const pluginData = makeTempDir("zcode-mcp-data-");
   const child = spawn(process.execPath, [SERVER], {
@@ -50,14 +93,18 @@ function startServer() {
     env: {
       ...process.env,
       CODEX_COMPANION_HOST: "zcode",
-      CODEX_COMPANION_PLUGIN_ROOT: ROOT,
+      CODEX_COMPANION_PLUGIN_ROOT: options.pluginRoot ?? ROOT,
       ZCODE_PLUGIN_DATA: pluginData,
-      ZCODE_PROJECT_DIR: projectDir
+      ZCODE_PROJECT_DIR: projectDir,
+      ...options.env
     },
     stdio: ["pipe", "pipe", "pipe"]
   });
   const lines = readline.createInterface({ input: child.stdout });
-  const pending = [];
+  const pending = new Map();
+  const messages = [];
+  const unsolicited = [];
+  const messageWaiters = [];
   let stderr = "";
 
   child.stderr.setEncoding("utf8");
@@ -65,34 +112,68 @@ function startServer() {
     stderr += chunk;
   });
   lines.on("line", (line) => {
-    pending.shift()?.resolve(JSON.parse(line));
-  });
-  child.on("exit", (code) => {
-    while (pending.length) {
-      pending.shift().reject(new Error(`MCP server exited ${code}: ${stderr}`));
+    const message = JSON.parse(line);
+    messages.push(message);
+    while (messageWaiters.length) {
+      messageWaiters.shift()(message);
+    }
+    if (Object.hasOwn(message, "id") && pending.has(message.id)) {
+      pending.get(message.id).resolve(message);
+      pending.delete(message.id);
+    } else {
+      unsolicited.push(message);
     }
   });
+  child.on("exit", (code) => {
+    for (const waiter of pending.values()) {
+      waiter.reject(new Error(`MCP server exited ${code}: ${stderr}`));
+    }
+    pending.clear();
+  });
+
+  async function waitForExit() {
+    if (child.exitCode == null) {
+      await once(child, "exit");
+    }
+    lines.close();
+    assert.equal(child.exitCode, 0, stderr);
+    assert.equal(stderr, "");
+  }
 
   return {
     child,
+    messages,
     pluginData,
     projectDir,
+    unsolicited,
     notify(method, params = {}) {
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
     },
     request(id, method, params = {}) {
-      const response = new Promise((resolve, reject) => pending.push({ resolve, reject }));
+      const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
       return response;
     },
-    async close() {
+    sendRaw(value) {
+      child.stdin.write(value);
+    },
+    waitForMessage(timeoutMs = 150) {
+      return Promise.race([
+        new Promise((resolve) => messageWaiters.push(resolve)),
+        delay(timeoutMs).then(() => {
+          throw new Error(`No server message within ${timeoutMs}ms`);
+        })
+      ]);
+    },
+    async endInput() {
       child.stdin.end();
-      if (child.exitCode == null) {
-        await once(child, "exit");
+      await waitForExit();
+    },
+    async close() {
+      if (!child.stdin.destroyed) {
+        child.stdin.end();
       }
-      lines.close();
-      assert.equal(child.exitCode, 0, stderr);
-      assert.equal(stderr, "");
+      await waitForExit();
     }
   };
 }
@@ -179,11 +260,121 @@ test("runner reports nonzero child exits with captured stderr", async () => {
   assert.deepEqual(result, { code: 7, stdout: "", stderr: "status failed\n" });
 });
 
+test("runner aborts the child and settles once across error and close races", async () => {
+  const controller = new AbortController();
+  const child = controlledChild();
+  const resultPromise = runCompanion(
+    { command: "status" },
+    {
+      env: {
+        CODEX_COMPANION_PLUGIN_ROOT: ROOT,
+        ZCODE_PROJECT_DIR: ROOT
+      },
+      signal: controller.signal,
+      spawnImpl() {
+        return child;
+      }
+    }
+  );
+
+  controller.abort();
+  const result = await resultPromise;
+
+  assert.deepEqual(child.killSignals, ["SIGTERM"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /cancelled/i);
+  assert.equal(child.listenerCount("error"), 0);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdout.listenerCount("data"), 0);
+  assert.equal(child.stderr.listenerCount("data"), 0);
+});
+
+test("runner cleans up when child termination throws", async () => {
+  const controller = new AbortController();
+  const child = controlledChild();
+  child.kill = () => {
+    throw new Error("kill unavailable");
+  };
+  const resultPromise = runCompanion(
+    { command: "status" },
+    {
+      env: {
+        CODEX_COMPANION_PLUGIN_ROOT: ROOT,
+        ZCODE_PROJECT_DIR: ROOT
+      },
+      signal: controller.signal,
+      spawnImpl() {
+        return child;
+      }
+    }
+  );
+
+  controller.abort();
+  const result = await resultPromise;
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /cancelled/i);
+  assert.equal(child.listenerCount("error"), 0);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdout.listenerCount("data"), 0);
+  assert.equal(child.stderr.listenerCount("data"), 0);
+});
+
+test("runner enforces its timeout and cleans up the child", async () => {
+  const child = controlledChild();
+  const result = await runCompanion(
+    { command: "status" },
+    {
+      env: {
+        CODEX_COMPANION_PLUGIN_ROOT: ROOT,
+        ZCODE_PROJECT_DIR: ROOT
+      },
+      timeoutMs: 5,
+      spawnImpl() {
+        return child;
+      }
+    }
+  );
+
+  assert.equal(companionRunner.DEFAULT_COMPANION_TIMEOUT_MS, 15 * 60 * 1000);
+  assert.deepEqual(child.killSignals, ["SIGTERM"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /timed out/i);
+});
+
+test("runner terminates when combined output exceeds the fixed capture limit", async () => {
+  const child = controlledChild();
+  const resultPromise = runCompanion(
+    { command: "status" },
+    {
+      env: {
+        CODEX_COMPANION_PLUGIN_ROOT: ROOT,
+        ZCODE_PROJECT_DIR: ROOT
+      },
+      maxOutputBytes: 16,
+      spawnImpl() {
+        return child;
+      }
+    }
+  );
+
+  child.stdout.write("1234567890");
+  child.stderr.write("abcdefghij");
+  const result = await resultPromise;
+
+  assert.equal(companionRunner.MAX_COMPANION_OUTPUT_BYTES, 8 * 1024 * 1024);
+  assert.deepEqual(child.killSignals, ["SIGTERM"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /output.*limit/i);
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) < 256);
+});
+
 test("stdio server initializes, handles notifications and ping, and lists one companion tool", async (t) => {
   const server = startServer();
   t.after(() => server.close());
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, ".zcode-plugin", "plugin.json"), "utf8"));
 
-  assert.deepEqual(await server.request(1, "initialize", { protocolVersion: "2024-11-05" }), {
+  assert.deepEqual(await server.request(1, "initialize", { protocolVersion: "2099-01-01" }), {
     jsonrpc: "2.0",
     id: 1,
     result: {
@@ -193,12 +384,11 @@ test("stdio server initializes, handles notifications and ping, and lists one co
       },
       serverInfo: {
         name: "codex-companion-zcode",
-        version: "1.0.0"
+        version: manifest.version
       }
     }
   });
 
-  server.notify("notifications/initialized");
   assert.deepEqual(await server.request(2, "ping"), {
     jsonrpc: "2.0",
     id: 2,
@@ -227,6 +417,18 @@ test("stdio server initializes, handles notifications and ping, and lists one co
       ]
     }
   });
+});
+
+test("stdio notifications never produce responses", async (t) => {
+  const server = startServer();
+  t.after(() => server.close());
+
+  server.notify("notifications/initialized");
+  server.notify("notifications/cancelled", { requestId: "missing" });
+  server.notify("notifications/future-event", { value: true });
+  await server.request(1, "ping");
+
+  assert.deepEqual(server.unsolicited, []);
 });
 
 test("stdio tools/call returns companion stdout as MCP text", async (t) => {
@@ -294,4 +496,134 @@ test("stdio tools/call rejects arbitrary commands and malformed input", async (t
   assert.equal(malformed.result.isError, true);
   assert.match(malformed.result.content[0].text, /arguments.*string/);
   assert.equal(fs.existsSync(marker), false);
+});
+
+test("stdio tools/call rejects unknown tools with Invalid params", async (t) => {
+  const server = startServer();
+  t.after(() => server.close());
+
+  const response = await server.request(1, "tools/call", {
+    name: "arbitrary",
+    arguments: {
+      command: "status"
+    }
+  });
+
+  assert.deepEqual(response, {
+    jsonrpc: "2.0",
+    id: 1,
+    error: {
+      code: -32602,
+      message: "Invalid params: unknown tool arbitrary"
+    }
+  });
+});
+
+test("stdio cancellation aborts the matching call and emits only its tool response", async (t) => {
+  const pluginRoot = makeFixturePlugin();
+  const started = path.join(pluginRoot, "started");
+  const killed = path.join(pluginRoot, "killed");
+  const server = startServer({ pluginRoot });
+  t.after(() => server.close());
+
+  const call = server.request("call-1", "tools/call", {
+    name: "companion",
+    arguments: {
+      command: "status",
+      arguments: `"${started}" "${killed}"`
+    }
+  });
+  while (!fs.existsSync(started)) {
+    await delay(5);
+  }
+  server.notify("notifications/cancelled", { requestId: "call-1" });
+  const response = await call;
+  await server.request("ping-after-cancel", "ping");
+
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /cancelled/i);
+  assert.equal(fs.existsSync(killed), true);
+  assert.deepEqual(server.unsolicited, []);
+  assert.equal(server.messages.filter((message) => message.id === "call-1").length, 1);
+});
+
+test("stdio EOF aborts every active companion call", async () => {
+  const pluginRoot = makeFixturePlugin();
+  const started = path.join(pluginRoot, "started");
+  const killed = path.join(pluginRoot, "killed");
+  const server = startServer({ pluginRoot });
+
+  server.request(1, "tools/call", {
+    name: "companion",
+    arguments: {
+      command: "status",
+      arguments: `"${started}" "${killed}"`
+    }
+  }).catch(() => {});
+  while (!fs.existsSync(started)) {
+    await delay(5);
+  }
+  await server.endInput();
+
+  assert.equal(fs.existsSync(killed), true);
+  const response = server.messages.find((message) => message.id === 1);
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /cancelled|shutdown/i);
+});
+
+test("stdio server caps concurrent companion calls without spawning an extra child", async (t) => {
+  const pluginRoot = makeFixturePlugin();
+  const started = path.join(pluginRoot, "started");
+  const killed = path.join(pluginRoot, "killed");
+  const server = startServer({ pluginRoot });
+  t.after(() => server.close());
+
+  const calls = Array.from({ length: 4 }, (_, index) =>
+    server.request(index + 1, "tools/call", {
+      name: "companion",
+      arguments: {
+        command: "status",
+        arguments: `"${started}" "${killed}"`
+      }
+    })
+  );
+  while (!fs.existsSync(started) || fs.readFileSync(started, "utf8").trim().split("\n").length < 4) {
+    await delay(5);
+  }
+  const overflow = await server.request(5, "tools/call", {
+    name: "companion",
+    arguments: {
+      command: "status",
+      arguments: `"${started}" "${killed}"`
+    }
+  });
+
+  assert.equal(overflow.result.isError, true);
+  assert.match(overflow.result.content[0].text, /too many|concurrent|limit/i);
+  assert.equal(fs.readFileSync(started, "utf8").trim().split("\n").length, 4);
+
+  for (let index = 1; index <= 4; index += 1) {
+    server.notify("notifications/cancelled", { requestId: index });
+  }
+  const responses = await Promise.all(calls);
+  assert.ok(responses.every((response) => response.result.isError === true));
+});
+
+test("stdio server rejects an oversized unterminated NDJSON line before EOF", async (t) => {
+  const server = startServer();
+  t.after(() => server.close());
+
+  const messagePromise = server.waitForMessage();
+  server.sendRaw(Buffer.alloc(1024 * 1024 + 1, 0x20));
+  const response = await messagePromise;
+
+  assert.deepEqual(response, {
+    jsonrpc: "2.0",
+    id: null,
+    error: {
+      code: -32700,
+      message: "Parse error"
+    }
+  });
+  assert.equal(server.messages.length, 1);
 });

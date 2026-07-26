@@ -14,7 +14,7 @@
 
 **Files:**
 - Create: `.zcode-plugin/plugin.json`
-- Create: `.zcode-plugin/marketplace.json`
+- Create: `marketplace.json`
 - Create: `plugins/zcode/commands/setup.md`
 - Create: `tests/zcode-plugin.test.mjs`
 - Modify: `scripts/bump-version.mjs`
@@ -65,7 +65,7 @@ Create `.zcode-plugin/plugin.json` with:
 }
 ```
 
-Create `.zcode-plugin/marketplace.json` with one plugin sourced from `"."`, and create a static `setup.md` that instructs ZCode to call:
+Create the root `marketplace.json` with one plugin sourced from `"."`, and create a static `setup.md` that instructs ZCode to call:
 
 ```bash
 node "${ZCODE_PLUGIN_ROOT}/plugins/codex/scripts/codex-companion.mjs" setup --json $ARGUMENTS
@@ -75,7 +75,7 @@ The command body must ask through ZCode's normal user-input tool before a global
 
 - [ ] **Step 4: Teach version tooling about both ZCode manifests**
 
-Extend the release manifest list in `scripts/bump-version.mjs` so the package, Claude marketplace/plugin manifest, ZCode marketplace, and ZCode plugin manifest stay on one version.
+Extend the release manifest list in `scripts/bump-version.mjs` so the package, Claude marketplace/plugin manifest, root ZCode marketplace, and ZCode plugin manifest stay on one version.
 
 - [ ] **Step 5: Run the focused tests and verify GREEN**
 
@@ -85,12 +85,12 @@ Expected: PASS.
 
 - [ ] **Step 6: Validate through the installed ZCode protocol**
 
-Start `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs app-server`, call `plugins/validate` with the worktree as source, and assert the result has no error diagnostics and lists `commands`, `skills`, and `hooks`.
+Start `node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs app-server`, call `plugins/validate` with the absolute root `marketplace.json` path as source, and assert the result has no error diagnostics and lists `commands`, `skills`, and `hooks`. ZCode 0.15.2 only auto-discovers `.claude-plugin/marketplace.json` or a root `marketplace.json`; a marketplace nested under `.zcode-plugin` cannot reference the repository root because plugin source resolution rejects `..`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add .zcode-plugin plugins/zcode/commands/setup.md scripts/bump-version.mjs tests/bump-version.test.mjs tests/zcode-plugin.test.mjs
+git add .zcode-plugin marketplace.json plugins/zcode/commands/setup.md scripts/bump-version.mjs tests/bump-version.test.mjs tests/zcode-plugin.test.mjs
 git commit -m "feat: add ZCode plugin package"
 ```
 
@@ -577,7 +577,7 @@ Commit with `fix: harden shared companion state`, push, and update risk/test not
 
 - [ ] **Step 1: Install the local marketplace**
 
-Add the worktree/repository as a local ZCode marketplace through ZCode Protocol `plugins/marketplace/add`, install `codex`, enable it, and record the installed plugin root. Preserve the user's existing enabled plugins and settings.
+Add the worktree's absolute root `marketplace.json` file as a local ZCode marketplace through ZCode Protocol `plugins/marketplace/add`, install `codex`, enable it, and record the installed plugin root. Preserve the user's existing enabled plugins and settings.
 
 - [ ] **Step 2: Verify discovery**
 

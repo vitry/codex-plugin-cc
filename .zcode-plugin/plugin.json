@@ -1,19 +1,20 @@
 {
   "name": "codex",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Use Codex from ZCode to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"
   },
   "license": "Apache-2.0",
   "commands": "plugins/zcode/commands",
-  "agents": "plugins/zcode/agents",
   "skills": "plugins/codex/skills",
   "hooks": "plugins/zcode/hooks/hooks.json",
   "mcpServers": {
     "codex": {
       "command": "node",
-      "args": ["${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/mcp-server.mjs"],
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/mcp-server.mjs"
+      ],
       "cwd": "${ZCODE_PROJECT_DIR}",
       "env": {
         "CODEX_COMPANION_HOST": "zcode",

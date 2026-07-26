@@ -75,7 +75,6 @@ test("ZCode manifest defines the independent Codex plugin", () => {
     },
     license: "Apache-2.0",
     commands: "plugins/zcode/commands",
-    agents: "plugins/zcode/agents",
     skills: "plugins/codex/skills",
     hooks: "plugins/zcode/hooks/hooks.json",
     mcpServers: {
@@ -202,21 +201,13 @@ test("ZCode review commands preserve target, execution, and read-only semantics"
   assert.match(adversarial, /implementation approach|design choices/i);
 });
 
-test("ZCode rescue delegates routing and runtime controls through its registered agent", () => {
+test("ZCode rescue delegates directly without relying on unsupported plugin agents", () => {
   const manifest = readJson(".zcode-plugin/plugin.json");
   const rescue = commandSource("rescue");
-  const agent = read("plugins/zcode/agents/codex-rescue.md");
-  const agentFrontmatter = Object.fromEntries(
-    frontmatterEntries(agent).map(({ key, value }) => [key, value])
-  );
 
-  assert.equal(manifest.agents, "plugins/zcode/agents");
-  assert.equal(agentFrontmatter.name, "codex-rescue");
-  assert.match(agentFrontmatter.description, /\S/);
-  assert.equal(agentFrontmatter.tools, "mcp__codex__companion");
-  assert.deepEqual(Object.keys(agentFrontmatter).sort(), ["description", "name", "tools"]);
-
-  assert.match(rescue, /codex:codex-rescue/);
+  assert.equal(Object.hasOwn(manifest, "agents"), false);
+  assert.equal(fs.existsSync(path.join(ROOT, "plugins/zcode/agents/codex-rescue.md")), false);
+  assert.doesNotMatch(rescue, /\bAgent\b|codex:codex-rescue/);
   assert.match(rescue, /--resume/);
   assert.match(rescue, /--fresh/);
   assert.match(rescue, /--model <model\|spark>/);
@@ -225,16 +216,10 @@ test("ZCode rescue delegates routing and runtime controls through its registered
   assert.match(rescue, /Start a new Codex thread/);
   assert.match(rescue, /gpt-5\.3-codex-spark/);
   assert.match(rescue, /verbatim/i);
-  assert.match(rescue, /forward `--background`/i);
-  assert.doesNotMatch(rescue, /Do not forward either flag/i);
-
-  assert.equal([...agent.matchAll(/\bmcp__codex__companion\b/g)].length, 1);
-  assert.match(agent, /exactly one/i);
-  assert.match(agent, /"command"\s*:\s*"task"/);
-  assert.match(agent, /"arguments"\s*:\s*"--write <forwarded arguments>"/);
-  assert.match(agent, /verbatim/i);
-  assert.match(agent, /no other tools|do not use any other tool/i);
-  assert.doesNotMatch(agent, /\b(?:Read|Glob|Grep|Bash|Agent)\b/);
+  assert.match(rescue, /preserve `--background`|forward `--background`/i);
+  assert.match(rescue, /"command"\s*:\s*"task"/);
+  assert.match(rescue, /"arguments"\s*:\s*"--write <forwarded arguments>"/);
+  assert.match(rescue, /exactly once/i);
 });
 
 test("ZCode job commands preserve arguments and output contracts", () => {

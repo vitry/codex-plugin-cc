@@ -13,6 +13,38 @@ const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
 
+function resolvePersistentRuntimeRoot() {
+  const homeDir = os.homedir();
+  if (process.platform === "darwin") {
+    return path.join(
+      homeDir,
+      "Library",
+      "Application Support",
+      "OpenAI",
+      "CodexCompanion",
+      "runtime"
+    );
+  }
+  if (process.platform === "win32") {
+    return path.join(
+      homeDir,
+      "AppData",
+      "Local",
+      "OpenAI",
+      "CodexCompanion",
+      "runtime"
+    );
+  }
+  return path.join(
+    homeDir,
+    ".local",
+    "state",
+    "openai",
+    "codex-companion",
+    "runtime"
+  );
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -27,7 +59,7 @@ function defaultState() {
   };
 }
 
-export function resolveStateDir(cwd, env = process.env) {
+function resolveWorkspaceStateDir(cwd, stateRoot) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonicalWorkspaceRoot = workspaceRoot;
   try {
@@ -39,9 +71,22 @@ export function resolveStateDir(cwd, env = process.env) {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  const pluginDataDir = resolveHostPluginDataDir(env);
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
   return path.join(stateRoot, `${slug}-${hash}`);
+}
+
+export function resolveStateDir(cwd, env = process.env) {
+  const pluginDataDir = resolveHostPluginDataDir(env);
+  const stateRoot = pluginDataDir
+    ? path.join(pluginDataDir, "state")
+    : FALLBACK_STATE_ROOT_DIR;
+  return resolveWorkspaceStateDir(cwd, stateRoot);
+}
+
+export function resolvePersistentRuntimeDir(cwd, stateRoot = null) {
+  return resolveWorkspaceStateDir(
+    cwd,
+    stateRoot || resolvePersistentRuntimeRoot()
+  );
 }
 
 export function resolveStateFile(cwd) {

@@ -21,6 +21,7 @@ const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.m
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
+export const BROKER_INSTANCE_ID_ENV = "CODEX_COMPANION_APP_SERVER_INSTANCE_ID";
 export const APP_SERVER_MODE_ENV = "CODEX_COMPANION_APP_SERVER_MODE";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
@@ -78,6 +79,26 @@ class AppServerClientBase {
 
   setNotificationHandler(handler) {
     this.notificationHandler = handler;
+  }
+
+  async waitForExit(timeoutMs = 1000) {
+    if (this.exitResolved) {
+      return true;
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(exited);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      timer.unref?.();
+      void this.exitPromise.then(() => finish(true));
+    });
   }
 
   /**
@@ -232,9 +253,10 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     this.notify("initialized", {});
   }
 
-  async close() {
+  async close(options = {}) {
+    const timeoutMs = Math.max(100, options.timeoutMs ?? 1000);
     if (this.closed) {
-      await this.exitPromise;
+      await this.waitForExit(timeoutMs + 100);
       return;
     }
 
@@ -244,9 +266,11 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.readline.close();
     }
 
+    let terminateTimer = null;
+    let forceTimer = null;
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.end();
-      setTimeout(() => {
+      terminateTimer = setTimeout(() => {
         if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
           // On Windows with shell: true, the direct child is cmd.exe.
           // Use terminateProcessTree to kill the entire tree including
@@ -262,10 +286,27 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
             this.proc.kill("SIGTERM");
           }
         }
-      }, 50).unref?.();
+      }, Math.min(50, Math.floor(timeoutMs / 2)));
+      terminateTimer.unref?.();
+      forceTimer = setTimeout(() => {
+        if (this.proc && this.proc.exitCode === null) {
+          try {
+            this.proc.kill("SIGKILL");
+          } catch {
+            // The process may have exited between the check and signal.
+          }
+        }
+      }, timeoutMs);
+      forceTimer.unref?.();
     }
 
-    await this.exitPromise;
+    await this.waitForExit(timeoutMs + 100);
+    if (terminateTimer) {
+      clearTimeout(terminateTimer);
+    }
+    if (forceTimer) {
+      clearTimeout(forceTimer);
+    }
   }
 
   sendMessage(message) {
@@ -305,16 +346,26 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       });
     });
 
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? resolveClientInfo(this.options.env ?? process.env),
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
+    const actualInstanceId =
+      /** @type {{ brokerInstanceId?: string }} */ (initialized).brokerInstanceId;
+    if (
+      !this.options.brokerInstanceId ||
+      actualInstanceId !== this.options.brokerInstanceId
+    ) {
+      this.socket.destroy();
+      throw new Error("Codex app-server broker instance mismatch.");
+    }
     this.notify("initialized", {});
   }
 
-  async close() {
+  async close(options = {}) {
+    const timeoutMs = Math.max(100, options.timeoutMs ?? 1000);
     if (this.closed) {
-      await this.exitPromise;
+      await this.waitForExit(timeoutMs);
       return;
     }
 
@@ -322,7 +373,10 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     if (this.socket) {
       this.socket.end();
     }
-    await this.exitPromise;
+    const exited = await this.waitForExit(timeoutMs);
+    if (!exited) {
+      this.socket?.destroy();
+    }
   }
 
   sendMessage(message) {
@@ -338,19 +392,49 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
+    let brokerInstanceId = null;
     const appServerMode = options.env?.[APP_SERVER_MODE_ENV] ?? process.env[APP_SERVER_MODE_ENV];
     if (!options.disableBroker && appServerMode !== "direct") {
-      brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
+      if (options.brokerEndpoint && !options.brokerInstanceId) {
+        throw new Error(
+          "A broker instance identity is required with an explicit broker endpoint."
+        );
+      }
+      const envEndpoint =
+        options.env?.[BROKER_ENDPOINT_ENV] ??
+        process.env[BROKER_ENDPOINT_ENV] ??
+        null;
+      const envInstanceId =
+        options.env?.[BROKER_INSTANCE_ID_ENV] ??
+        process.env[BROKER_INSTANCE_ID_ENV] ??
+        null;
+      brokerEndpoint = options.brokerEndpoint ?? envEndpoint;
+      brokerInstanceId = options.brokerInstanceId ?? envInstanceId;
+      if (brokerEndpoint && !brokerInstanceId) {
+        brokerEndpoint = null;
+      }
       if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;
+        const brokerSession = loadBrokerSession(cwd);
+        if (
+          typeof brokerSession?.instanceId === "string" &&
+          brokerSession.instanceId
+        ) {
+          brokerEndpoint = brokerSession.endpoint ?? null;
+          brokerInstanceId = brokerSession.instanceId;
+        }
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
         const brokerSession = await ensureBrokerSession(cwd, { env: options.env });
         brokerEndpoint = brokerSession?.endpoint ?? null;
+        brokerInstanceId = brokerSession?.instanceId ?? null;
       }
     }
     const client = brokerEndpoint
-      ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
+      ? new BrokerCodexAppServerClient(cwd, {
+          ...options,
+          brokerEndpoint,
+          brokerInstanceId
+        })
       : new SpawnedCodexAppServerClient(cwd, options);
     await client.initialize();
     return client;

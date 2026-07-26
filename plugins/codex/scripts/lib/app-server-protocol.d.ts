@@ -52,6 +52,7 @@ export interface CodexAppServerClientOptions {
   clientInfo?: ClientInfo;
   capabilities?: InitializeCapabilities;
   brokerEndpoint?: string;
+  brokerInstanceId?: string;
   disableBroker?: boolean;
   reuseExistingBroker?: boolean;
 }

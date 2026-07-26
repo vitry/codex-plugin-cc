@@ -2577,12 +2577,75 @@ test("status reports shared session runtime when a lazy broker is active", (t) =
   assert.match(result.stdout, /Session runtime: shared session/);
 });
 
+test("ending one session keeps a broker leased by another session", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+  const baseEnv = buildSharedBrokerEnv(binDir);
+  const firstEnv = {
+    ...baseEnv,
+    CODEX_COMPANION_SESSION_ID: "session-one"
+  };
+  const secondEnv = {
+    ...baseEnv,
+    CODEX_COMPANION_SESSION_ID: "session-two"
+  };
+
+  const review = run("node", [SCRIPT, "review"], { cwd: repo, env: firstEnv });
+  assert.equal(review.status, 0, review.stderr);
+  const secondReview = run("node", [SCRIPT, "review"], { cwd: repo, env: secondEnv });
+  assert.equal(secondReview.status, 0, secondReview.stderr);
+  const shared = loadBrokerSession(repo);
+  assert.deepEqual(
+    shared.leases.map((lease) => lease.sessionId),
+    ["session-one", "session-two"]
+  );
+
+  const firstEnd = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: firstEnv,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: "session-one",
+      cwd: repo
+    })
+  });
+  assert.equal(firstEnd.status, 0, firstEnd.stderr);
+  assert.equal(loadBrokerSession(repo).instanceId, shared.instanceId);
+
+  const reused = run("node", [SCRIPT, "review"], { cwd: repo, env: secondEnv });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(
+    JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).appServerStarts,
+    1
+  );
+
+  const finalEnd = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: secondEnv,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: "session-two",
+      cwd: repo
+    })
+  });
+  assert.equal(finalEnd.status, 0, finalEnd.stderr);
+  assert.equal(loadBrokerSession(repo), null);
+});
+
 test("setup and status honor --cwd when reading shared session runtime", () => {
   const targetWorkspace = makeTempDir();
   const invocationWorkspace = makeTempDir();
 
   saveBrokerSession(targetWorkspace, {
-    endpoint: "unix:/tmp/fake-broker.sock"
+    endpoint: "unix:/tmp/fake-broker.sock",
+    instanceId: "fake-broker-instance"
   });
 
   const status = run("node", [SCRIPT, "status", "--cwd", targetWorkspace], {

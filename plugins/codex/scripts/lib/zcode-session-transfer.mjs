@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_DATABASE_PATH = path.join(os.homedir(), ".zcode", "cli", "db", "db.sqlite");
 const SESSION_ID_PATTERN = /^sess_[a-zA-Z0-9_-]+$/;
@@ -11,6 +12,7 @@ const DEFAULT_QUERY_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_PART_ROWS = 20_000;
+const NODE_SQLITE_QUERY = fileURLToPath(new URL("./zcode-sqlite-query.mjs", import.meta.url));
 
 function resolveUserPath(cwd, value) {
   if (value === "~") {
@@ -26,18 +28,59 @@ function sqlText(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function queryDatabase(databasePath, query, options = {}) {
-  const result = spawnSync(
-    options.sqliteCommand ?? "sqlite3",
-    ["-readonly", "-json", databasePath, query],
-    {
+function runQuery(command, args, options) {
+  return spawnSync(command, args, {
     encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: options.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS
-    }
+    maxBuffer: 2 * 1024 * 1024,
+    timeout: options.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
+    windowsHide: true
+  });
+}
+
+function nodeSqliteUnavailable(result) {
+  return (
+    result.status !== 0 &&
+    /ERR_UNKNOWN_BUILTIN_MODULE|No such built-in module:\s*node:sqlite|bad option:\s*--experimental-sqlite/i.test(
+      String(result.stderr ?? "")
+    )
   );
+}
+
+function queryDatabase(databasePath, query, options = {}) {
+  let result;
+  let engine;
+  if (options.sqliteCommand) {
+    engine = "sqlite3";
+    result = runQuery(
+      options.sqliteCommand,
+      ["-readonly", "-json", databasePath, query],
+      options
+    );
+    if (result.error?.code === "ENOENT") {
+      engine = "Node SQLite";
+      result = runQuery(
+        process.execPath,
+        ["--experimental-sqlite", "--no-warnings", NODE_SQLITE_QUERY, databasePath, query],
+        options
+      );
+    }
+  } else {
+    engine = "Node SQLite";
+    result = runQuery(
+      process.execPath,
+      ["--experimental-sqlite", "--no-warnings", NODE_SQLITE_QUERY, databasePath, query],
+      options
+    );
+    if (nodeSqliteUnavailable(result)) {
+      engine = "sqlite3";
+      result = runQuery("sqlite3", ["-readonly", "-json", databasePath, query], options);
+    }
+  }
+
   if (result.error?.code === "ENOENT") {
-    throw new Error("ZCode session transfer requires the sqlite3 command.");
+    throw new Error(
+      "ZCode session transfer requires Node.js 22.5 or later, or the sqlite3 command."
+    );
   }
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
@@ -54,7 +97,7 @@ function queryDatabase(databasePath, query, options = {}) {
   }
   if (result.status !== 0) {
     throw new Error(
-      `Could not read the ZCode session database: ${String(result.stderr || "").trim() || `sqlite3 exited with ${result.status}`}`
+      `Could not read the ZCode session database: ${String(result.stderr || "").trim() || `${engine} exited with ${result.status}`}`
     );
   }
   const output = String(result.stdout ?? "").trim();
@@ -64,7 +107,7 @@ function queryDatabase(databasePath, query, options = {}) {
   try {
     return JSON.parse(output);
   } catch (cause) {
-    throw new Error("sqlite3 returned invalid JSON for the ZCode session database.", {
+    throw new Error(`${engine} returned invalid JSON for the ZCode session database.`, {
       cause
     });
   }

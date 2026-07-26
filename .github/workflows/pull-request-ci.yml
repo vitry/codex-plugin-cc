@@ -54,4 +54,6 @@ jobs:
         run: npm ci
 
       - name: Test Windows lock and state lifecycle
-        run: node --test tests/file-lock.test.mjs tests/state.test.mjs
+        run: |
+          node --test tests/file-lock.test.mjs tests/state.test.mjs
+          node --test --test-name-pattern="Node SQLite reader" tests/zcode-session-transfer.test.mjs

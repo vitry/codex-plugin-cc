@@ -17,6 +17,16 @@ Sensitive session, job, thread, account, and temporary path values are redacted
 below. The installed `plugins/codex` and `plugins/zcode` trees were compared
 against the source worktree before behavioral verification.
 
+Redacted aliases used below are `<zcode-session>`, `<review-job>`,
+`<rescue-job>`, `<cancel-job>`, and `<codex-thread>`. Before test cleanup, job
+records and logs were located at:
+
+```text
+~/.zcode/cli/plugins/data/codex@openai-codex/state/<workspace>-<hash>/state.json
+~/.zcode/cli/plugins/data/codex@openai-codex/state/<workspace>-<hash>/jobs/<job-id>.json
+~/.zcode/cli/plugins/data/codex@openai-codex/state/<workspace>-<hash>/jobs/<job-id>.log
+```
+
 ## Installation And Discovery
 
 The local repository-root `marketplace.json` was registered as
@@ -65,7 +75,7 @@ development plugin before reinstalling gives a deterministic refresh.
 
 Before installed-runtime verification:
 
-- Full test suite: 193 tests, 189 passed, 4 Windows-only skipped, 0 failed.
+- Full test suite: 195 tests, 191 passed, 4 Windows-only skipped, 0 failed.
 - ZCode-focused suite after direct-rescue adaptation: 37 passed, 0 failed.
 - `npm run build`: passed.
 - `npm run check-version`: passed for 1.1.0.
@@ -79,6 +89,37 @@ verified the same commit on both platforms:
 
 - Ubuntu: 193 tests, 189 passed, 4 Windows-only skipped, 0 failed; build passed.
 - Windows: 16 lock/state tests, 15 passed, 1 Unix-only skipped, 0 failed.
+
+## Installed E2E Command Record
+
+The following commands were sent through the installed companion MCP tool in
+a disposable repository. Values in angle brackets are the aliases defined
+above:
+
+```text
+setup --json
+review --background
+status <review-job> --wait --json
+result <review-job> --json
+adversarial-review --wait inspect the deliberately changed lines
+task --write --fresh create the requested first-line fixture
+task --write --resume append the requested second-line fixture
+task --background --write create a cancellable fixture
+cancel <cancel-job> --json
+status <cancel-job> --json
+transfer --source <zcode-session> --json
+```
+
+The review and rescue records contained redacted persistent
+`<codex-thread>` identifiers. `result` returned the stored review, cancellation
+persisted `status: cancelled`, transfer returned a resumable thread, and the
+disposable repository contained only the requested rescue edits.
+
+The installed hook entrypoints were also invoked with redacted ZCode
+SessionStart, PreToolUse, and Stop payloads. PreToolUse used the production
+tool name `mcp__plugin_codex_codex__companion`; Stop was exercised with the
+review gate disabled, with a syntax failure that returned `decision: block`,
+and after repair with no block decision.
 
 ## Baseline Capability Audit
 

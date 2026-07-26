@@ -859,34 +859,39 @@ test("ZCode SessionStart persists lifecycle session metadata", () => {
   assert.match(getConfig(repo).zcodeSessions["sess-zcode"].startedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
-test("ZCode PreToolUse injects the calling session into companion MCP input", () => {
-  const result = run("node", [ZCODE_MCP_SESSION_HOOK], {
-    cwd: ROOT,
-    env: process.env,
-    input: JSON.stringify({
-      hookEventName: "PreToolUse",
-      sessionId: "sess-zcode-call",
-      toolName: "mcp__codex__companion",
-      toolInput: {
-        command: "status",
-        arguments: "--json",
-        sessionId: "sess-spoofed"
-      }
-    })
-  });
+for (const toolName of [
+  "mcp__plugin_codex_codex__companion",
+  "mcp__codex__companion"
+]) {
+  test(`ZCode PreToolUse injects the calling session into ${toolName}`, () => {
+    const result = run("node", [ZCODE_MCP_SESSION_HOOK], {
+      cwd: ROOT,
+      env: process.env,
+      input: JSON.stringify({
+        hookEventName: "PreToolUse",
+        sessionId: "sess-zcode-call",
+        toolName,
+        toolInput: {
+          command: "status",
+          arguments: "--json",
+          sessionId: "sess-spoofed"
+        }
+      })
+    });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      updatedInput: {
-        command: "status",
-        arguments: "--json",
-        sessionId: "sess-zcode-call"
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: {
+          command: "status",
+          arguments: "--json",
+          sessionId: "sess-zcode-call"
+        }
       }
-    }
+    });
   });
-});
+}
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {
   const repo = makeTempDir();

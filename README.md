@@ -18,6 +18,7 @@ rescue tasks, session transfer, and the optional stop-time review gate.
 - **ChatGPT subscription (incl. Free) or OpenAI API key.**
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
 - **Node.js 18.18 or later**
+- **For `/codex:transfer`: Node.js 22.5 or later, or the `sqlite3` command**
 
 ## Install
 
@@ -155,10 +156,20 @@ before testing the command layer.
 /codex:transfer --source /path/to/db.sqlite#sess_<id>
 ```
 
-The adapter reads visible user/assistant text through the system `sqlite3` command and does not
-modify the ZCode database. ZCode lifecycle and review-gate hooks are active: `SessionStart` records
-lifecycle metadata, `PreToolUse` binds each companion MCP call to the calling ZCode session, and
-`Stop` runs the optional review gate.
+The adapter reads visible user/assistant text through Node.js 22.5+'s built-in SQLite reader,
+falling back to the system `sqlite3` command on older Node.js versions. It opens the ZCode database
+read-only and does not modify it. ZCode lifecycle and review-gate hooks are active: `SessionStart`
+records lifecycle metadata, `PreToolUse` binds each companion MCP call to the calling ZCode
+session, and `Stop` runs the optional review gate.
+
+ZCode stores workspace-partitioned state under
+`$ZCODE_PLUGIN_DATA/state/<workspace-name>-<hash>/`: `state.json` contains the
+bounded job index, `jobs/` contains detailed job records and logs, and shared
+broker metadata is stored alongside them. The runtime falls back to the system
+temporary directory only when the host does not provide a plugin data
+directory. ZCode 0.15.2 does not expose `SessionEnd`; abandoned broker leases
+are therefore reclaimed by bounded idle shutdown and stale-owner checks rather
+than immediate end-of-session cleanup.
 
 Remove the development plugin with the supported CLI:
 

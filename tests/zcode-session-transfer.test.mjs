@@ -103,6 +103,44 @@ test("exports the current ZCode session as deterministic visible Claude JSONL", 
   assert.deepEqual(fs.readFileSync(fixture.databasePath), databaseBefore);
 });
 
+test("exports through the Node SQLite reader when no sqlite3 command is available", async (t) => {
+  const root = makeTempDir();
+  const databasePath = path.join(root, "node.sqlite");
+  const repo = path.join(root, "repo");
+  fs.mkdirSync(repo);
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite requires Node.js 22.5 or later");
+    return;
+  }
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec([
+      "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);",
+      "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+      "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+      `INSERT INTO session VALUES ('sess_current', ${sql(repo)}, 'Current session', 1000, 1000);`,
+      `INSERT INTO message VALUES ('msg_u1', 'sess_current', 1100, 1100, ${sql(JSON.stringify({ role: "user" }))});`,
+      `INSERT INTO part VALUES ('part_u1', 'msg_u1', 'sess_current', 1110, 1110, ${sql(JSON.stringify({ type: "text", text: "First request" }))});`
+    ].join("\n"));
+  } finally {
+    database.close();
+  }
+
+  const exported = exportZCodeSession(repo, {
+    sessionId: "sess_current",
+    databasePath,
+    outputDir: path.join(root, "exports"),
+    sqliteCommand: path.join(root, "missing-sqlite3")
+  });
+
+  assert.equal(exported.sessionId, "sess_current");
+  assert.equal(exported.messageCount, 1);
+  assert.match(fs.readFileSync(exported.sourcePath, "utf8"), /First request/);
+});
+
 test("preserves visible text whitespace", () => {
   const root = makeTempDir();
   const fixture = createDatabase(root);

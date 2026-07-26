@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__codex__companion",
+        "matcher": "^mcp__(?:plugin_codex_)?codex__companion$",
         "hooks": [
           {
             "type": "process",

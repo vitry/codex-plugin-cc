@@ -1,4 +1,4 @@
-# Codex Plugin Current Capabilities and Runtime Dependencies
+# Codex Plugin Pre-Adaptation Capability Baseline
 
 ## Scope and baseline
 
@@ -7,9 +7,9 @@ branch was `main`, but `main`, local `zcode-adapter`, `origin/main`, and
 `origin/zcode-adapter` all pointed to that same commit when the research was
 performed.
 
-This is intentionally the pre-adaptation baseline. The implemented ZCode
-mapping and installed-runtime evidence are recorded in
-`docs/verification/zcode-0.15.2.md`.
+This is intentionally the historical pre-adaptation baseline, not a statement
+of current branch gaps. The implemented ZCode mapping and installed-runtime
+evidence are recorded in `docs/verification/zcode-0.15.2.md`.
 
 Primary evidence:
 
@@ -335,7 +335,9 @@ The repository's tests cover:
 - marketplace/plugin/package version consistency:
   `tests/bump-version.test.mjs`.
 
-Notably absent are stress tests for simultaneous state writers, overlapping
-host sessions sharing one workspace broker, crash recovery from truncated
-state/job files, and zcode lifecycle integration. Those gaps align with the
-highest-risk migration points above.
+At this baseline, stress tests for simultaneous state writers, overlapping
+host sessions sharing one workspace broker, crash recovery, and ZCode
+lifecycle integration were absent. The adapter branch adds concurrent
+state/lock coverage, shared-session broker tests, stale-runtime recovery, and
+ZCode lifecycle tests; current results are recorded in
+`docs/verification/zcode-0.15.2.md`.

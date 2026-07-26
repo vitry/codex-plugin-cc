@@ -104,7 +104,10 @@ test("ZCode manifest defines the independent Codex plugin", () => {
     assert.equal(Number.isInteger(hook.timeoutMs), true);
     assert.equal(Object.hasOwn(hook, "timeout"), false);
   }
-  assert.equal(hooks.hooks.PreToolUse[0].matcher, "mcp__codex__companion");
+  const companionMatcher = new RegExp(hooks.hooks.PreToolUse[0].matcher);
+  assert.equal(companionMatcher.test("mcp__plugin_codex_codex__companion"), true);
+  assert.equal(companionMatcher.test("mcp__codex__companion"), true);
+  assert.equal(companionMatcher.test("mcp__plugin_other_codex__companion"), false);
   assert.equal(hooks.hooks.Stop[0].hooks[0].timeoutMs, 960000);
   const stopWrapper = read("plugins/zcode/scripts/stop-review-gate-hook.mjs");
   assert.match(stopWrapper, /WRAPPER_TIMEOUT_MS\s*=\s*930000/);
@@ -126,6 +129,13 @@ test("ZCode marketplace exposes one repository-root plugin", () => {
     },
     source: "."
   });
+});
+
+test("ZCode transfer enables the Node 22.5 SQLite implementation", () => {
+  assert.match(
+    read("plugins/codex/scripts/lib/zcode-session-transfer.mjs"),
+    /"--experimental-sqlite",\s*"--no-warnings"/
+  );
 });
 
 test("ZCode exposes the exact static command set with recognized frontmatter", () => {

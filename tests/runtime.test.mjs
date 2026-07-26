@@ -29,6 +29,30 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   throw new Error("Timed out waiting for condition.");
 }
 
+function buildSharedBrokerEnv(binDir) {
+  return {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_APP_SERVER_MODE: "shared"
+  };
+}
+
+function registerBrokerCleanup(t, cwd, env) {
+  t.after(() => {
+    if (!loadBrokerSession(cwd)) {
+      return;
+    }
+    const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+      cwd,
+      env,
+      input: JSON.stringify({
+        hook_event_name: "SessionEnd",
+        cwd
+      })
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  });
+}
+
 test("setup reports ready when fake codex is installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -808,7 +832,7 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   assert.equal(fakeState.lastTurnStart.effort, "low");
 });
 
-test("ZCode task starts a thread with the ZCode service name", () => {
+test("ZCode broker starts a thread with ZCode client metadata", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -818,17 +842,26 @@ test("ZCode task starts a thread with the ZCode service name", () => {
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
+  const env = {
+    ...buildSharedBrokerEnv(binDir),
+    CODEX_COMPANION_HOST: "zcode",
+    ZCODE_PROJECT_DIR: repo
+  };
+  registerBrokerCleanup(t, repo, env);
+
   const result = run("node", [SCRIPT, "task", "check host metadata"], {
     cwd: repo,
-    env: {
-      ...buildEnv(binDir),
-      CODEX_COMPANION_HOST: "zcode",
-      ZCODE_PROJECT_DIR: repo
-    }
+    env
   });
 
   assert.equal(result.status, 0, result.stderr);
+  assert.ok(loadBrokerSession(repo), "ZCode broker coverage requires an active broker");
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.deepEqual(fakeState.clientInfo, {
+    title: "Codex Plugin",
+    name: "ZCode",
+    version: PLUGIN_VERSION
+  });
   assert.equal(fakeState.lastThreadStart.serviceName, "zcode_codex_plugin");
 });
 
@@ -938,7 +971,7 @@ test("task can finish after subagent work even if the parent turn/completed even
   assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
 });
 
-test("task using the shared broker still completes when Codex spawns subagents", () => {
+test("task using the shared broker still completes when Codex spawns subagents", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "with-subagent");
@@ -948,16 +981,15 @@ test("task using the shared broker still completes when Codex spawns subagents",
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
     env
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
+  assert.ok(loadBrokerSession(repo), "shared-broker coverage requires an active broker");
 
   const result = run("node", [SCRIPT, "task", "challenge the current design"], {
     cwd: repo,
@@ -1785,7 +1817,7 @@ test("cancel with a job id can still target an active job from another Claude se
   assert.equal(state.jobs[0].status, "cancelled");
 });
 
-test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async () => {
+test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -1795,7 +1827,8 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
   const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
     cwd: repo,
     env
@@ -2198,7 +2231,7 @@ test("stop hook runs the actual task when auth status looks stale", () => {
   assert.match(payload.reason, /Missing empty-state guard/i);
 });
 
-test("commands lazily start and reuse one shared app-server after first use", async () => {
+test("commands lazily start and reuse one shared app-server after first use", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2210,7 +2243,8 @@ test("commands lazily start and reuse one shared app-server after first use", as
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
 
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
@@ -2219,9 +2253,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(review.status, 0, review.stderr);
 
   const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
+  assert.ok(brokerSession, "shared-broker coverage requires an active broker");
 
   const adversarial = run("node", [SCRIPT, "adversarial-review"], {
     cwd: repo,
@@ -2243,7 +2275,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("setup reuses an existing shared app-server without starting another one", () => {
+test("setup reuses an existing shared app-server without starting another one", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2255,7 +2287,8 @@ test("setup reuses an existing shared app-server without starting another one", 
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
 
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
@@ -2264,9 +2297,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(review.status, 0, review.stderr);
 
   const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
+  assert.ok(brokerSession, "shared-broker coverage requires an active broker");
 
   const setup = run("node", [SCRIPT, "setup", "--json"], {
     cwd: repo,
@@ -2288,7 +2319,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("status reports shared session runtime when a lazy broker is active", () => {
+test("status reports shared session runtime when a lazy broker is active", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -2298,19 +2329,20 @@ test("status reports shared session runtime when a lazy broker is active", () =>
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
+
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
+  assert.ok(loadBrokerSession(repo), "shared-broker coverage requires an active broker");
 
   const result = run("node", [SCRIPT, "status"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env
   });
 
   assert.equal(result.status, 0, result.stderr);

@@ -57,6 +57,10 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
+  exportZCodeSession,
+  parseZCodeSessionSource
+} from "./lib/zcode-session-transfer.mjs";
+import {
   renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
@@ -83,7 +87,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-      "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
+      "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl|zcode-session|sqlite[#session]>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -618,7 +622,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 
 function renderTransferResult(payload) {
   const lines = [
-    "Transferred the Claude session into a Codex thread with visible turn history.",
+    `Transferred the ${payload.sourceHost} session into a Codex thread with visible turn history.`,
     `Codex session ID: ${payload.threadId}`,
     `Resume in Codex: ${payload.resumeCommand}`
   ];
@@ -626,15 +630,50 @@ function renderTransferResult(payload) {
 }
 
 async function executeTransfer(cwd, options = {}) {
-  const sourcePath = resolveClaudeSessionPath(cwd, {
-    source: options.source
-  });
-  const result = await importExternalAgentSession(cwd, { sourcePath });
+  const host = resolveHost(process.env, cwd);
+  let sourcePath;
+  let sourceSessionId;
+  let sourceHost;
+  let cleanupRoot = null;
+  let importHome = null;
+  let sourceCwd = cwd;
+
+  if (host.kind === "zcode") {
+    const selected = parseZCodeSessionSource(options.source);
+    const exported = exportZCodeSession(cwd, selected);
+    sourcePath = exported.sourcePath;
+    sourceSessionId = exported.sessionId;
+    sourceHost = "ZCode";
+    cleanupRoot = exported.cleanupRoot;
+    importHome = exported.importHome;
+    sourceCwd = exported.cwd;
+  } else {
+    sourcePath = resolveClaudeSessionPath(cwd, {
+      source: options.source
+    });
+    sourceSessionId = path.basename(sourcePath, ".jsonl");
+    sourceHost = "Claude Code";
+  }
+
+  let result;
+  try {
+    result = await importExternalAgentSession(cwd, {
+      sourcePath,
+      sourceLabel: sourceHost === "ZCode" ? "ZCode" : "Claude",
+      importHome,
+      sourceCwd
+    });
+  } finally {
+    if (cleanupRoot) {
+      fs.rmSync(cleanupRoot, { recursive: true, force: true });
+    }
+  }
   const payload = {
     threadId: result.threadId,
     resumeCommand: `codex resume ${result.threadId}`,
-    sourcePath,
-    sessionId: path.basename(sourcePath, ".jsonl")
+    sourcePath: sourceHost === "ZCode" ? null : sourcePath,
+    sessionId: sourceSessionId,
+    sourceHost
   };
 
   return {

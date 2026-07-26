@@ -358,13 +358,28 @@ rl.on("line", (line) => {
       }
 
       case "externalAgentConfig/import": {
+        const importId = "import_1";
         if (BEHAVIOR === "external-import-unsupported") {
           send({ id: message.id, error: { code: -32601, message: "Unsupported method: externalAgentConfig/import" } });
           break;
         }
         if (BEHAVIOR === "external-import-fails") {
-          send({ id: message.id, result: {} });
-          send({ method: "externalAgentConfig/import/completed", params: {} });
+          send({ id: message.id, result: { importId } });
+          send({
+            method: "externalAgentConfig/import/completed",
+            params: {
+              importId,
+              itemTypeResults: [{
+                itemType: "SESSIONS",
+                successes: [],
+                failures: [{
+                  itemType: "SESSIONS",
+                  failureStage: "session_missing",
+                  message: "external agent session was not detected for import"
+                }]
+              }]
+            }
+          });
           break;
         }
         const sessions = (message.params.migrationItems || [])
@@ -405,8 +420,18 @@ rl.on("line", (line) => {
           saveState(state);
           saveImportLedger(ledger);
         }
-        send({ id: message.id, result: {} });
-        send({ method: "externalAgentConfig/import/completed", params: {} });
+        send({ id: message.id, result: { importId } });
+        send({
+          method: "externalAgentConfig/import/completed",
+          params: {
+            importId,
+            itemTypeResults: [{
+              itemType: "SESSIONS",
+              successes: [{ itemType: "SESSIONS", source: sourcePath, target: thread.id }],
+              failures: []
+            }]
+          }
+        });
         break;
       }
 
@@ -660,6 +685,7 @@ export function buildEnv(binDir) {
   return {
     ...process.env,
     PATH: `${binDir}${sep}${process.env.PATH}`,
+    CODEX_HOME: path.join(binDir, "codex-home"),
     CODEX_COMPANION_APP_SERVER_MODE: "direct"
   };
 }

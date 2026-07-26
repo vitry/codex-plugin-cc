@@ -243,9 +243,9 @@ test("ZCode job commands preserve arguments and output contracts", () => {
   const result = commandSource("result");
   const cancel = commandSource("cancel");
 
-  assert.match(transfer, /\[--source <claude-jsonl>\]/);
-  assert.match(transfer, /Claude JSONL transcript/i);
-  assert.doesNotMatch(transfer, /current ZCode session/i);
+  assert.match(transfer, /\[--source <session-id\|sqlite-path\|sqlite-path#session-id>\]/);
+  assert.match(transfer, /current ZCode session|calling ZCode session/i);
+  assert.match(transfer, /SQLite/);
   assert.match(transfer, /Codex session ID/);
   assert.match(transfer, /codex resume <session-id>/);
   assert.match(transfer, /verbatim|exactly as returned/i);

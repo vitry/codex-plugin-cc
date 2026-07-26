@@ -56,6 +56,15 @@ function registerBrokerCleanup(t, cwd, env) {
   });
 }
 
+function sqlText(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+test("fake Codex environments isolate the import ledger", () => {
+  const binDir = makeTempDir();
+  assert.equal(buildEnv(binDir).CODEX_HOME, path.join(binDir, "codex-home"));
+});
+
 test("setup reports ready when fake codex is installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -295,6 +304,84 @@ test("transfer delegates the current Claude session directly to native import", 
   );
 });
 
+test("transfer exports the calling ZCode session and imports it into Codex", () => {
+  const root = makeTempDir();
+  const repo = path.join(root, "repo");
+  const binDir = makeTempDir();
+  const pluginData = path.join(root, "plugin-data");
+  const databasePath = path.join(root, "db.sqlite");
+  const otherRepo = path.join(root, "other-repo");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(otherRepo);
+  fs.mkdirSync(pluginData);
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const statements = [
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);",
+    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+    "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+    `INSERT INTO session VALUES ('sess_zcode_transfer', ${sqlText(repo)}, 'ZCode transfer', 1000, 2000);`,
+    `INSERT INTO session VALUES ('sess_zcode_other', ${sqlText(otherRepo)}, 'Other ZCode transfer', 1000, 2000);`,
+    `INSERT INTO message VALUES ('msg_user', 'sess_zcode_transfer', 1100, 1100, ${sqlText(JSON.stringify({ role: "user" }))});`,
+    `INSERT INTO part VALUES ('part_user', 'msg_user', 'sess_zcode_transfer', 1110, 1110, ${sqlText(JSON.stringify({ type: "text", text: "Continue from ZCode" }))});`,
+    `INSERT INTO message VALUES ('msg_assistant', 'sess_zcode_transfer', 1200, 1200, ${sqlText(JSON.stringify({ role: "assistant" }))});`,
+    `INSERT INTO part VALUES ('part_assistant', 'msg_assistant', 'sess_zcode_transfer', 1210, 1210, ${sqlText(JSON.stringify({ type: "text", text: "ZCode answer" }))});`,
+    `INSERT INTO message VALUES ('msg_other', 'sess_zcode_other', 1300, 1300, ${sqlText(JSON.stringify({ role: "user" }))});`,
+    `INSERT INTO part VALUES ('part_other', 'msg_other', 'sess_zcode_other', 1310, 1310, ${sqlText(JSON.stringify({ type: "text", text: "Other workspace request" }))});`
+  ];
+  const created = run("sqlite3", [databasePath], {
+    cwd: repo,
+    input: statements.join("\n")
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const result = run("node", [SCRIPT, "transfer", "--json"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      CODEX_COMPANION_SESSION_ID: "sess_zcode_transfer",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_PLUGIN_DATA: pluginData,
+      ZCODE_SESSION_DB_PATH: databasePath
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.threadId, "thr_1");
+  assert.equal(payload.sessionId, "sess_zcode_transfer");
+  assert.equal(payload.sourcePath, null);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.notEqual(fakeState.lastExternalAgentImport.sourcePath.startsWith(path.join(process.env.HOME, ".claude")), true);
+  assert.deepEqual(
+    fakeState.threads[0].visibleMessages.map((message) => message.text),
+    ["Continue from ZCode", "ZCode answer"]
+  );
+
+  const explicit = run(
+    "node",
+    [SCRIPT, "transfer", "--source", `${databasePath}#sess_zcode_other`, "--json"],
+    {
+      cwd: repo,
+      env: {
+        ...buildEnv(binDir),
+        CODEX_COMPANION_HOST: "zcode",
+        ZCODE_PROJECT_DIR: repo
+      }
+    }
+  );
+  assert.equal(explicit.status, 0, explicit.stderr);
+  const explicitState = JSON.parse(
+    fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")
+  );
+  const explicitPayload = JSON.parse(explicit.stdout);
+  assert.equal(
+    explicitState.threads.find((thread) => thread.id === explicitPayload.threadId).cwd,
+    otherRepo
+  );
+});
+
 test("transfer reports an actionable upgrade error when native import is unsupported", () => {
   const home = makeTempDir();
   const repo = path.join(home, "repo");
@@ -325,7 +412,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
   assert.match(result.stderr, /@openai\/codex@latest/);
 });
 
-test("transfer fails visibly when native import completes without a ledger record", () => {
+test("transfer reports failures from the native import completion", () => {
   const home = makeTempDir();
   const repo = path.join(home, "repo");
   const binDir = makeTempDir();
@@ -351,7 +438,7 @@ test("transfer fails visibly when native import completes without a ledger recor
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /did not record an imported thread/);
+  assert.match(result.stderr, /external agent session was not detected for import/);
 });
 
 test("transfer rejects sources outside the Claude projects directory", () => {

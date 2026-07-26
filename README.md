@@ -134,15 +134,18 @@ review to verify the MCP bridge:
 /codex:review
 ```
 
-At this Draft milestone, `/codex:transfer` requires an explicit Claude Code transcript:
+`/codex:transfer` imports the current ZCode session into a persistent Codex thread:
 
 ```bash
-/codex:transfer --source <claude-jsonl>
+/codex:transfer
+/codex:transfer --source sess_<id>
+/codex:transfer --source /path/to/db.sqlite#sess_<id>
 ```
 
-Transferring the current ZCode session is not implemented yet. ZCode lifecycle and review-gate
-hooks are active: `SessionStart` records lifecycle metadata, `PreToolUse` binds each companion MCP
-call to the calling ZCode session, and `Stop` runs the optional review gate.
+The adapter reads visible user/assistant text through the system `sqlite3` command and does not
+modify the ZCode database. ZCode lifecycle and review-gate hooks are active: `SessionStart` records
+lifecycle metadata, `PreToolUse` binds each companion MCP call to the calling ZCode session, and
+`Stop` runs the optional review gate.
 
 Remove the development plugin with the supported CLI:
 
@@ -245,18 +248,26 @@ Ask Codex to redesign the database connection to be more resilient.
 
 ### `/codex:transfer`
 
-Creates a persistent Codex thread from the current Claude Code session and prints a `codex resume <session-id>` command.
+Creates a persistent Codex thread from the current host session and prints a `codex resume <session-id>` command.
 
-Use it when you started a debugging or implementation conversation in Claude Code and want to continue that same context directly in Codex.
+In ZCode, the command reads the calling session from the ZCode SQLite database:
 
 Examples:
 
 ```bash
 /codex:transfer
-/codex:transfer --source ~/.claude/projects/-Users-me-repo/<session-id>.jsonl
+/codex:transfer --source sess_<id>
+/codex:transfer --source /path/to/db.sqlite#sess_<id>
 ```
 
-The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
+Only visible user and assistant text is exported; reasoning and tool records are excluded. The
+database is opened read-only, and the compatibility transcript is held in a private temporary
+directory that is removed after import.
+
+In Claude Code, `SessionStart` supplies the current transcript automatically, and
+`--source ~/.claude/projects/<project>/<session-id>.jsonl` remains available as a manual override.
+Both hosts use Codex's external-agent session importer to create visible turns that can be continued
+in the App or TUI. Older Codex versions that do not expose session import must be upgraded first.
 
 ### `/codex:status`
 

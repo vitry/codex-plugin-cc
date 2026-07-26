@@ -639,6 +639,6 @@ Dispatch one reviewer for objective/spec compliance and a separate reviewer for 
 
 Map every existing command/hook/runtime capability in `docs/research/current-capabilities.md` to an automated test and ZCode verification result. Treat missing evidence as incomplete work.
 
-- [ ] **Step 5: Push and mark Ready**
+- [x] **Step 5: Push and mark Ready**
 
 Push the reviewed commit, replace provisional PR notes with final evidence, and convert the Draft PR to Ready for review. Do not create or target an upstream OpenAI PR.

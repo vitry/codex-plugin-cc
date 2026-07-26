@@ -21,7 +21,7 @@ test("ZCode manifest defines the independent Codex plugin", () => {
 
   assert.deepEqual(manifest, {
     name: "codex",
-    version: "1.0.6",
+    version: packageJson.version,
     description: DESCRIPTION,
     author: {
       name: "OpenAI"

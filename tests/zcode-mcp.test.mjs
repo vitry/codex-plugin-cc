@@ -609,6 +609,50 @@ test("stdio server caps concurrent companion calls without spawning an extra chi
   assert.ok(responses.every((response) => response.result.isError === true));
 });
 
+test("stdio server rejects a duplicate active request id without spawning another child", async (t) => {
+  const pluginRoot = makeFixturePlugin();
+  const started = path.join(pluginRoot, "started");
+  const killed = path.join(pluginRoot, "killed");
+  const server = startServer({ pluginRoot });
+  t.after(() => server.close());
+
+  const call = {
+    jsonrpc: "2.0",
+    id: "duplicate",
+    method: "tools/call",
+    params: {
+      name: "companion",
+      arguments: {
+        command: "status",
+        arguments: `"${started}" "${killed}"`
+      }
+    }
+  };
+  server.sendRaw(`${JSON.stringify(call)}\n`);
+  while (!fs.existsSync(started)) {
+    await delay(5);
+  }
+
+  const duplicateResponse = server.waitForMessage();
+  server.sendRaw(`${JSON.stringify(call)}\n`);
+
+  assert.deepEqual(await duplicateResponse, {
+    jsonrpc: "2.0",
+    id: "duplicate",
+    error: {
+      code: -32600,
+      message: "Invalid Request: duplicate active request id"
+    }
+  });
+  assert.equal(fs.readFileSync(started, "utf8").trim().split("\n").length, 1);
+
+  const originalResponse = server.waitForMessage();
+  server.notify("notifications/cancelled", { requestId: "duplicate" });
+  const firstResponse = await originalResponse;
+  assert.equal(firstResponse.result.isError, true);
+  assert.match(firstResponse.result.content[0].text, /cancelled/i);
+});
+
 test("stdio server rejects an oversized unterminated NDJSON line before EOF", async (t) => {
   const server = startServer();
   t.after(() => server.close());

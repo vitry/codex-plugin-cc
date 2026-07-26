@@ -132,6 +132,11 @@ async function handleMessage(message) {
     return;
   }
 
+  if (activeCalls.has(message.id)) {
+    error(message.id, -32600, "Invalid Request: duplicate active request id");
+    return;
+  }
+
   switch (message.method) {
     case "initialize":
       result(message.id, {

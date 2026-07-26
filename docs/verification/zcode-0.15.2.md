@@ -3,7 +3,7 @@
 ## Scope
 
 - Date: 2026-07-26
-- Runtime source commit: `4afbd67`
+- Runtime source commit: `df1d88a`
 - Branch and PR: `zcode-adapter`, `vitry/codex-plugin-cc#1`
 - ZCode Desktop: 3.3.6
 - ZCode CLI: 0.15.2
@@ -75,20 +75,28 @@ development plugin before reinstalling gives a deterministic refresh.
 
 Before installed-runtime verification:
 
-- Full test suite: 195 tests, 191 passed, 4 Windows-only skipped, 0 failed.
+- Full test suite: 196 tests, 192 passed, 4 Windows-only skipped, 0 failed.
 - ZCode-focused suite after direct-rescue adaptation: 37 passed, 0 failed.
 - `npm run build`: passed.
 - `npm run check-version`: passed for 1.1.0.
 - `git diff --check`: passed.
 - Independent runtime-hardening reviews: `SPEC PASS` and `QUALITY PASS`.
+- Final objective audit: `FINAL SPEC PASS`.
+- Final complete-diff code review after the production tool-name and
+  cross-platform SQLite fixes: `FINAL QUALITY PASS`.
 
 The four local skips exercise Windows mutex ownership, crash reclamation,
 same-process exclusion, and stale async context. GitHub Actions
-[run 30203963619](https://github.com/vitry/codex-plugin-cc/actions/runs/30203963619)
-verified the same commit on both platforms:
+[run 30204541169](https://github.com/vitry/codex-plugin-cc/actions/runs/30204541169)
+verified commit `df1d88a` on both platforms:
 
-- Ubuntu: 193 tests, 189 passed, 4 Windows-only skipped, 0 failed; build passed.
-- Windows: 16 lock/state tests, 15 passed, 1 Unix-only skipped, 0 failed.
+- Ubuntu: 196 tests, 192 passed, 4 Windows-only skipped, 0 failed; build passed.
+- Windows: 16 lock/state tests (15 passed, 1 Unix-only skipped) plus the
+  no-system-`sqlite3` transfer test; 0 failed.
+
+The built-in SQLite query helper was also executed directly with Node.js
+22.5.1 and `--experimental-sqlite`, reading `SELECT 1` from the ZCode database
+without the system `sqlite3` command.
 
 ## Installed E2E Command Record
 
@@ -120,6 +128,35 @@ SessionStart, PreToolUse, and Stop payloads. PreToolUse used the production
 tool name `mcp__plugin_codex_codex__companion`; Stop was exercised with the
 review gate disabled, with a syntax failure that returned `decision: block`,
 and after repair with no block decision.
+
+## Exact-Commit Reverification
+
+After the final code-review fixes, ZCode Protocol refreshed the local
+marketplace, removed the old cache, and installed commit `df1d88a` again.
+Source/cache comparisons for `.zcode-plugin`, `plugins/zcode`,
+`plugins/codex/scripts`, and `marketplace.json` had no differences.
+
+The exact installed cache was then exercised again:
+
+- discovery returned zero diagnostics, eight commands, three skills, three
+  runnable hooks, and one connected MCP server;
+- the registered PreToolUse matcher was
+  `^mcp__(?:plugin_codex_)?codex__companion$`, and the installed hook injected
+  the session into the production MCP tool name;
+- transfer imported a real ZCode session through the built-in Node SQLite
+  reader and returned a resumable Codex thread;
+- setup reported Codex ready;
+- a background working-tree review completed, appeared in status, and returned
+  its stored result;
+- a fresh write-capable rescue created only the requested file and content;
+- a second background rescue was cancelled, persisted as `cancelled`, and did
+  not create its delayed output;
+- the enabled Stop gate blocked deliberately invalid JavaScript and emitted no
+  block decision after repair; the gate was disabled again after the test;
+- the model-driven `/codex:status --all` path made three model requests,
+  expanded the command, called
+  `mcp__plugin_codex_codex__companion`, delivered its result, and emitted
+  `turn.completed` with no last error.
 
 ## Baseline Capability Audit
 

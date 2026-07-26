@@ -614,7 +614,7 @@ Commit with `docs: record ZCode end-to-end verification`, push, and update the D
 - Review all files changed from `origin/main...zcode-adapter`
 - Update the existing GitHub PR
 
-- [ ] **Step 1: Run release verification**
+- [x] **Step 1: Run release verification**
 
 Run:
 
@@ -627,15 +627,15 @@ npm test
 
 Expected: all commands succeed with no failed tests.
 
-- [ ] **Step 2: Run ZCode manifest/runtime verification again**
+- [x] **Step 2: Run ZCode manifest/runtime verification again**
 
 Re-run `plugins/validate`, `plugins/describe`, command discovery, setup, one review, one rescue, status/result/cancel, transfer, and Stop gate checks against the exact pushed commit.
 
-- [ ] **Step 3: Perform two-stage review**
+- [x] **Step 3: Perform two-stage review**
 
 Dispatch one reviewer for objective/spec compliance and a separate reviewer for code quality. Fix every confirmed issue with a failing regression test and re-run both reviews.
 
-- [ ] **Step 4: Audit the objective**
+- [x] **Step 4: Audit the objective**
 
 Map every existing command/hook/runtime capability in `docs/research/current-capabilities.md` to an automated test and ZCode verification result. Treat missing evidence as incomplete work.
 

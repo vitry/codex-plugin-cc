@@ -1,0 +1,12 @@
+{
+  "name": "codex",
+  "version": "1.0.6",
+  "description": "Use Codex from ZCode to review code or delegate tasks.",
+  "author": {
+    "name": "OpenAI"
+  },
+  "license": "Apache-2.0",
+  "commands": "plugins/zcode/commands",
+  "skills": "plugins/codex/skills",
+  "hooks": "plugins/zcode/hooks/hooks.json"
+}

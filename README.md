@@ -72,6 +72,86 @@ One simple first run is:
 /codex:result
 ```
 
+## ZCode Local Development Install (Draft)
+
+The ZCode adapter is under active development. These instructions install the plugin from this
+worktree without changing the Claude Code installation described above.
+
+ZCode 0.15.2 supports listing, enabling, disabling, and uninstalling plugins from its CLI. Adding a
+local marketplace and installing from it are currently **ZCode Protocol-only** operations; they are
+not available as `zcode plugins` CLI subcommands. You can perform those two operations through
+ZCode Desktop's plugin management UI or a client connected to `zcode app-server`.
+
+If the ZCode CLI is not on your `PATH` on macOS, the Desktop app's bundled CLI can be used as:
+
+```bash
+alias zcode='node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
+```
+
+From the repository root, resolve the local marketplace file:
+
+```bash
+MARKETPLACE_FILE="$(pwd)/marketplace.json"
+```
+
+The local marketplace is the repository-root `marketplace.json`, not a file inside
+`.zcode-plugin`. Install it as follows:
+
+1. **Protocol-only:** call `plugins/marketplace/add` with `source` set to the absolute
+   `$MARKETPLACE_FILE` path. ZCode registers its marketplace ID as `openai-codex`.
+2. **Protocol-only:** call `plugins/install` for plugin `codex` from marketplace
+   `openai-codex`.
+3. Enable the installed plugin for new sessions:
+
+```bash
+zcode plugins enable codex@openai-codex
+```
+
+Confirm that ZCode discovers the enabled plugin and commands:
+
+```bash
+zcode plugins list --json
+zcode commands list --json
+```
+
+The plugin list should contain `codex@openai-codex`. Command discovery should contain these eight
+commands:
+
+- `/codex:setup`
+- `/codex:review`
+- `/codex:adversarial-review`
+- `/codex:rescue`
+- `/codex:transfer`
+- `/codex:status`
+- `/codex:result`
+- `/codex:cancel`
+
+Start a new ZCode session after changing plugin enablement. Then run `/codex:setup` and a read-only
+review to verify the MCP bridge:
+
+```bash
+/codex:setup
+/codex:review
+```
+
+At this Draft milestone, `/codex:transfer` requires an explicit Claude Code transcript:
+
+```bash
+/codex:transfer --source <claude-jsonl>
+```
+
+Transferring the current ZCode session is not implemented yet. ZCode lifecycle and review-gate
+hooks are also not active in this milestone.
+
+Remove the development plugin with the supported CLI:
+
+```bash
+zcode plugins uninstall codex@openai-codex --force
+```
+
+After uninstalling the plugin, removing the local `openai-codex` marketplace itself is a
+**Protocol-only** `plugins/marketplace/remove` operation.
+
 ## Usage
 
 ### `/codex:review`

@@ -29,7 +29,20 @@ test("ZCode manifest defines the independent Codex plugin", () => {
     license: "Apache-2.0",
     commands: "plugins/zcode/commands",
     skills: "plugins/codex/skills",
-    hooks: "plugins/zcode/hooks/hooks.json"
+    hooks: "plugins/zcode/hooks/hooks.json",
+    mcpServers: {
+      codex: {
+        command: "node",
+        args: ["${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/mcp-server.mjs"],
+        cwd: "${ZCODE_PROJECT_DIR}",
+        env: {
+          CODEX_COMPANION_HOST: "zcode",
+          CODEX_COMPANION_PLUGIN_ROOT: "${ZCODE_PLUGIN_ROOT}",
+          ZCODE_PLUGIN_DATA: "${ZCODE_PLUGIN_DATA}",
+          ZCODE_PROJECT_DIR: "${ZCODE_PROJECT_DIR}"
+        }
+      }
+    }
   });
   assert.equal(manifest.version, packageJson.version);
 });

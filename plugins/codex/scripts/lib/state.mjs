@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { withFileLockSync } from "./file-lock.mjs";
 import { resolveHostPluginDataDir } from "./host.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -89,7 +90,22 @@ function removeFileIfExists(filePath) {
   }
 }
 
-export function saveState(cwd, state) {
+function writeJsonAtomic(filePath, value) {
+  const tempPath = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    removeFileIfExists(tempPath);
+  }
+}
+
+function stateLockPath(cwd) {
+  ensureStateDir(cwd);
+  return path.join(resolveStateDir(cwd), ".state.lock");
+}
+
+function saveStateUnlocked(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
   const nextJobs = pruneJobs(state.jobs ?? []);
@@ -111,14 +127,20 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeJsonAtomic(resolveStateFile(cwd), nextState);
   return nextState;
 }
 
+export function saveState(cwd, state) {
+  return withFileLockSync(stateLockPath(cwd), () => saveStateUnlocked(cwd, state));
+}
+
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  return withFileLockSync(stateLockPath(cwd), () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveStateUnlocked(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {
@@ -166,7 +188,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeJsonAtomic(jobFile, payload);
   return jobFile;
 }
 

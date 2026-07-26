@@ -5,6 +5,7 @@ import process from "node:process";
 
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
+import { withJobLock } from "./lib/job-lock.mjs";
 import {
   clearBrokerSession,
   LOG_FILE_ENV,
@@ -13,7 +14,15 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import {
+  listJobs,
+  readJobFile,
+  resolveJobFile,
+  resolveStateFile,
+  updateState,
+  upsertJob,
+  writeJobFile
+} from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -39,7 +48,7 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
+async function cleanupSessionJobs(cwd, sessionId) {
   if (!cwd || !sessionId) {
     return;
   }
@@ -50,27 +59,52 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
-  const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  const removedJobs = listJobs(workspaceRoot).filter((job) => job.sessionId === sessionId);
   if (removedJobs.length === 0) {
     return;
   }
 
   for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
+    const activeJob = await withJobLock(workspaceRoot, job.id, () => {
+      const current = listJobs(workspaceRoot).find((candidate) => candidate.id === job.id);
+      if (
+        !current ||
+        current.sessionId !== sessionId ||
+        (current.status !== "queued" && current.status !== "running")
+      ) {
+        return null;
+      }
+      const jobFile = resolveJobFile(workspaceRoot, job.id);
+      const stored = fs.existsSync(jobFile) ? readJobFile(jobFile) : current;
+      const cancelled = {
+        ...stored,
+        status: "cancelled",
+        phase: "cancelled",
+        pid: null,
+        errorMessage: "Session ended."
+      };
+      writeJobFile(workspaceRoot, job.id, cancelled);
+      upsertJob(workspaceRoot, {
+        id: job.id,
+        status: "cancelled",
+        phase: "cancelled",
+        pid: null,
+        errorMessage: "Session ended."
+      });
+      return current;
+    });
+    if (!activeJob) {
       continue;
     }
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      terminateProcessTree(activeJob.pid ?? Number.NaN);
     } catch {
       // Ignore teardown failures during session shutdown.
     }
   }
 
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
+  updateState(workspaceRoot, (state) => {
+    state.jobs = state.jobs.filter((job) => job.sessionId !== sessionId);
   });
 }
 
@@ -101,7 +135,7 @@ async function handleSessionEnd(input) {
     await sendBrokerShutdown(brokerEndpoint);
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  await cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,

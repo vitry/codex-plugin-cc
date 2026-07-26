@@ -1,5 +1,5 @@
 ---
-description: Transfer the current ZCode session into a resumable Codex thread
+description: Import an explicit Claude JSONL transcript into a resumable Codex thread
 argument-hint: '[--source <claude-jsonl>]'
 allowed-tools: mcp__codex__companion
 ---
@@ -7,7 +7,7 @@ allowed-tools: mcp__codex__companion
 Raw slash-command arguments:
 `$ARGUMENTS`
 
-Preserve the optional `--source <claude-jsonl>` argument exactly. Call `mcp__codex__companion` exactly once:
+Require and preserve `--source <claude-jsonl>` exactly. Call `mcp__codex__companion` exactly once:
 
 ```json
 {"command": "transfer", "arguments": "$ARGUMENTS"}

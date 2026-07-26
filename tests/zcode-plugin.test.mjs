@@ -64,6 +64,7 @@ function frontmatterEntries(source) {
 test("ZCode manifest defines the independent Codex plugin", () => {
   const packageJson = readJson("package.json");
   const manifest = readJson(".zcode-plugin/plugin.json");
+  const hooks = readJson("plugins/zcode/hooks/hooks.json");
 
   assert.deepEqual(manifest, {
     name: "codex",
@@ -92,6 +93,7 @@ test("ZCode manifest defines the independent Codex plugin", () => {
     }
   });
   assert.equal(manifest.version, packageJson.version);
+  assert.deepEqual(hooks, { hooks: {} });
 });
 
 test("ZCode marketplace exposes one repository-root plugin", () => {
@@ -207,6 +209,8 @@ test("ZCode rescue delegates routing and runtime controls through its registered
   assert.match(rescue, /Start a new Codex thread/);
   assert.match(rescue, /gpt-5\.3-codex-spark/);
   assert.match(rescue, /verbatim/i);
+  assert.match(rescue, /forward `--background`/i);
+  assert.doesNotMatch(rescue, /Do not forward either flag/i);
 
   assert.equal([...agent.matchAll(/\bmcp__codex__companion\b/g)].length, 1);
   assert.match(agent, /exactly one/i);
@@ -224,6 +228,8 @@ test("ZCode job commands preserve arguments and output contracts", () => {
   const cancel = commandSource("cancel");
 
   assert.match(transfer, /\[--source <claude-jsonl>\]/);
+  assert.match(transfer, /Claude JSONL transcript/i);
+  assert.doesNotMatch(transfer, /current ZCode session/i);
   assert.match(transfer, /Codex session ID/);
   assert.match(transfer, /codex resume <session-id>/);
   assert.match(transfer, /verbatim|exactly as returned/i);

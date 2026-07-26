@@ -11,7 +11,7 @@ Raw slash-command arguments:
 
 Request rules:
 - If no task text was supplied, ask what Codex should investigate or fix.
-- Treat `--background` and `--wait` as ZCode agent execution controls. Do not forward either flag to the agent. Use background only for `--background`; use foreground for `--wait` or when neither is present.
+- Forward `--background` to the agent so the companion runtime creates a detached, trackable job. Remove `--wait`, because foreground execution is the default. Run the ZCode agent itself in the foreground so its companion response, including any queued job ID, is returned reliably.
 - Preserve explicit `--resume` or `--fresh` routing, and do not ask about the routing choice when either is present.
 - If neither routing flag is present, call `mcp__codex__companion` with command `task-resume-candidate` and arguments `--json`. If a resumable thread is available, use ZCode's normal user question capability exactly once with `Continue current Codex thread` and `Start a new Codex thread`. Recommend continue for a clear follow-up request; otherwise recommend a fresh thread. Forward the choice as `--resume` or `--fresh`. If no candidate is available, do not ask.
 - Preserve `--model <model>` and `--effort <none|minimal|low|medium|high|xhigh>` as runtime controls. Leave both unset unless explicitly requested. Map model `spark` to `gpt-5.3-codex-spark`.

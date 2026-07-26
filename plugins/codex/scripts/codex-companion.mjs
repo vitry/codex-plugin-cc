@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { launchDetachedWorker } from "./lib/background-worker.mjs";
 import {
     buildPersistentTaskThreadName,
     DEFAULT_CONTINUE_PROMPT,
@@ -24,6 +24,8 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { resolveHost } from "./lib/host.mjs";
+import { withJobLock } from "./lib/job-lock.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -48,6 +50,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  failQueuedJob,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -668,34 +671,37 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
-  return child;
-}
-
-function enqueueBackgroundTask(cwd, job, request) {
+async function enqueueBackgroundJob(cwd, job, request, workerCommand) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  try {
+    await launchDetachedWorker({
+      cwd,
+      scriptPath: path.join(ROOT_DIR, "scripts", "codex-companion.mjs"),
+      workerCommand,
+      jobId: job.id
+    });
+  } catch (cause) {
+    const errorMessage = `Failed to launch background worker: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`;
+    if (await failQueuedJob(job, errorMessage)) {
+      appendLogLine(logFile, errorMessage);
+    }
+    throw new Error(errorMessage, { cause });
+  }
 
   return {
     payload: {
@@ -736,6 +742,21 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
+  if (options.background && resolveHost(process.env, cwd).kind === "zcode") {
+    ensureCodexAvailable(cwd);
+    const request = {
+      cwd,
+      base: options.base,
+      scope: options.scope,
+      model: options.model,
+      focusText,
+      reviewName: config.reviewName
+    };
+    const { payload } = await enqueueBackgroundJob(cwd, job, request, "review-worker");
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
   await runForegroundCommand(
     job,
     (progress) =>
@@ -799,7 +820,7 @@ async function handleTask(argv) {
       resumeLast,
       jobId: job.id
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = await enqueueBackgroundJob(cwd, job, request, "task-worker");
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -850,7 +871,6 @@ async function handleTaskWorker(argv) {
   if (!storedJob) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
-
   const request = storedJob.request;
   if (!request || typeof request !== "object") {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
@@ -865,7 +885,7 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
-  await runTrackedJob(
+  const execution = await runTrackedJob(
     {
       ...storedJob,
       workspaceRoot,
@@ -876,8 +896,74 @@ async function handleTaskWorker(argv) {
         ...request,
         onProgress: progress
       }),
-    { logFile }
+    {
+      logFile,
+      expectedStatus: "queued",
+      onStarted: notifyWorkerReady
+    }
   );
+  if (execution == null) {
+    notifyWorkerReady();
+  }
+}
+
+function notifyWorkerReady() {
+  if (typeof process.send !== "function") {
+    return;
+  }
+  process.send({ type: "ready" });
+  process.disconnect?.();
+}
+
+async function handleReviewWorker(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "job-id"]
+  });
+
+  if (!options["job-id"]) {
+    throw new Error("Missing required --job-id for review-worker.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
+  if (!storedJob) {
+    throw new Error(`No stored job found for ${options["job-id"]}.`);
+  }
+  const request = storedJob.request;
+  if (!request || typeof request !== "object") {
+    throw new Error(`Stored job ${options["job-id"]} is missing its review request payload.`);
+  }
+
+  const { logFile, progress } = createTrackedProgress(
+    {
+      ...storedJob,
+      workspaceRoot
+    },
+    {
+      logFile: storedJob.logFile ?? null
+    }
+  );
+  const execution = await runTrackedJob(
+    {
+      ...storedJob,
+      workspaceRoot,
+      logFile
+    },
+    () =>
+      executeReviewRun({
+        ...request,
+        onProgress: progress
+      }),
+    {
+      logFile,
+      expectedStatus: "queued",
+      onStarted: notifyWorkerReady
+    }
+  );
+  if (execution == null) {
+    notifyWorkerReady();
+  }
 }
 
 async function handleStatus(argv) {
@@ -968,8 +1054,37 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+  const target = resolveCancelableJob(cwd, reference, { env: process.env });
+  const cancellation = await withJobLock(target.workspaceRoot, target.job.id, () => {
+    const { workspaceRoot, job } = resolveCancelableJob(cwd, target.job.id, {
+      env: process.env
+    });
+    const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+    const completedAt = nowIso();
+    const nextJob = {
+      ...job,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      completedAt,
+      errorMessage: "Cancelled by user."
+    };
+    writeJobFile(workspaceRoot, job.id, {
+      ...existing,
+      ...nextJob,
+      cancelledAt: completedAt
+    });
+    upsertJob(workspaceRoot, {
+      id: job.id,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      errorMessage: "Cancelled by user.",
+      completedAt
+    });
+    return { workspaceRoot, job, existing, nextJob };
+  });
+  const { job, existing, nextJob } = cancellation;
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
 
@@ -985,30 +1100,6 @@ async function handleCancel(argv) {
 
   terminateProcessTree(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");
-
-  const completedAt = nowIso();
-  const nextJob = {
-    ...job,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-    errorMessage: "Cancelled by user."
-  };
-
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
-    ...nextJob,
-    cancelledAt: completedAt
-  });
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
 
   const payload = {
     jobId: job.id,
@@ -1048,6 +1139,9 @@ async function main() {
       break;
     case "task-worker":
       await handleTaskWorker(argv);
+      break;
+    case "review-worker":
+      await handleReviewWorker(argv);
       break;
     case "status":
       await handleStatus(argv);

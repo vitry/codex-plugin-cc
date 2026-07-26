@@ -1111,7 +1111,7 @@ test("adversarial review rejects staged-only scope to match review target select
   assert.match(result.stderr, /Use one of: auto, working-tree, branch, or pass --base <ref>/i);
 });
 
-test("review accepts --background while still running as a tracked review job", () => {
+test("Claude review --background leaves detachment to the host and returns the final review", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -1130,16 +1130,60 @@ test("review accepts --background while still running as a tracked review job", 
   const launchPayload = JSON.parse(launched.stdout);
   assert.equal(launchPayload.review, "Review");
   assert.match(launchPayload.codex.stdout, /No material issues found/);
+});
 
-  const status = run("node", [SCRIPT, "status"], {
+test("ZCode review --background enqueues a detached worker and exposes per-job status", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const launched = run("node", [SCRIPT, "review", "--background", "--json"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo
+    }
   });
 
+  assert.equal(launched.status, 0, launched.stderr);
+  const launchPayload = JSON.parse(launched.stdout);
+  assert.equal(launchPayload.status, "queued");
+  assert.match(launchPayload.jobId, /^review-/);
+
+  const status = run(
+    "node",
+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
+    {
+      cwd: repo,
+      env: {
+        ...buildEnv(binDir),
+        CODEX_COMPANION_HOST: "zcode",
+        ZCODE_PROJECT_DIR: repo
+      }
+    }
+  );
+
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /# Codex Status/);
-  assert.match(status.stdout, /Codex Review/);
-  assert.match(status.stdout, /completed/);
+  const statusPayload = JSON.parse(status.stdout);
+  assert.equal(statusPayload.job.id, launchPayload.jobId);
+  assert.equal(statusPayload.job.status, "completed");
+
+  const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo
+    }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(JSON.parse(result.stdout).storedJob.rendered, /No material issues found/);
 });
 
 test("status shows phases, hints, and the latest finished job", () => {

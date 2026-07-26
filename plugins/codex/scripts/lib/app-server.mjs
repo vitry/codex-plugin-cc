@@ -21,6 +21,7 @@ const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.m
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
+export const APP_SERVER_MODE_ENV = "CODEX_COMPANION_APP_SERVER_MODE";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
 /** @returns {ClientInfo} */
@@ -337,7 +338,8 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
-    if (!options.disableBroker) {
+    const appServerMode = options.env?.[APP_SERVER_MODE_ENV] ?? process.env[APP_SERVER_MODE_ENV];
+    if (!options.disableBroker && appServerMode !== "direct") {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
       if (!brokerEndpoint && options.reuseExistingBroker) {
         brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;

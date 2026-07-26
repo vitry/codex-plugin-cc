@@ -7,6 +7,7 @@
   },
   "license": "Apache-2.0",
   "commands": "plugins/zcode/commands",
+  "agents": "plugins/zcode/agents",
   "skills": "plugins/codex/skills",
   "hooks": "plugins/zcode/hooks/hooks.json",
   "mcpServers": {

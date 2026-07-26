@@ -1,33 +1,20 @@
 ---
 description: Check whether the local Codex CLI is ready and optionally toggle the stop-time review gate
 argument-hint: '[--enable-review-gate|--disable-review-gate]'
-allowed-tools: Bash(node:*), Bash(npm:*), AskUserQuestion
+allowed-tools: mcp__codex__companion, AskUserQuestion, Bash
 ---
 
-Run:
+Raw slash-command arguments:
+`$ARGUMENTS`
 
-```bash
-node "${ZCODE_PLUGIN_ROOT}/plugins/codex/scripts/codex-companion.mjs" setup --json $ARGUMENTS
+Call `mcp__codex__companion` with this input:
+
+```json
+{"command": "setup", "arguments": "--json $ARGUMENTS"}
 ```
 
-If the result says Codex is missing and npm is available:
-- Use `AskUserQuestion` exactly once to ask the user whether ZCode should install Codex globally.
-- Put the install option first and suffix it with `(Recommended)`.
-- Use these two options:
-  - `Install Codex (Recommended)`
-  - `Skip for now`
-- Only if the user confirms by choosing install, run:
+If the result says Codex is missing and npm is available, use ZCode's normal user question capability exactly once before any global installation. Put `Install Codex (Recommended)` first and `Skip for now` second.
 
-```bash
-npm install -g @openai/codex
-```
+Only after the user gives explicit confirmation, use ZCode's normal shell tool to install the `@openai/codex` package globally with npm. Then repeat the same companion setup call with `--json` plus the original arguments. The command Markdown itself must not invoke npm.
 
-- Then rerun:
-
-```bash
-node "${ZCODE_PLUGIN_ROOT}/plugins/codex/scripts/codex-companion.mjs" setup --json $ARGUMENTS
-```
-
-If Codex is already installed or npm is unavailable, do not offer installation.
-
-Present the final setup output to the user. If installation was declined, present the original setup output. If Codex is installed but not authenticated, preserve the guidance to run `!codex login`.
+If installation is declined, present the original setup output. If Codex is already installed or npm is unavailable, do not offer installation. Present the final setup output without discarding details. If Codex is installed but not authenticated, preserve the guidance to run `codex login`.

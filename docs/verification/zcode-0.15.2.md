@@ -3,7 +3,7 @@
 ## Scope
 
 - Date: 2026-07-26
-- Runtime source commit: `004d457`
+- Runtime source commit: `4afbd67`
 - Branch and PR: `zcode-adapter`, `vitry/codex-plugin-cc#1`
 - ZCode Desktop: 3.3.6
 - ZCode CLI: 0.15.2
@@ -73,9 +73,12 @@ Before installed-runtime verification:
 - Independent runtime-hardening reviews: `SPEC PASS` and `QUALITY PASS`.
 
 The four local skips exercise Windows mutex ownership, crash reclamation,
-same-process exclusion, and stale async context. A Windows GitHub Actions job
-is prepared but cannot be pushed until the current GitHub OAuth token receives
-the `workflow` scope.
+same-process exclusion, and stale async context. GitHub Actions
+[run 30203963619](https://github.com/vitry/codex-plugin-cc/actions/runs/30203963619)
+verified the same commit on both platforms:
+
+- Ubuntu: 193 tests, 189 passed, 4 Windows-only skipped, 0 failed; build passed.
+- Windows: 16 lock/state tests, 15 passed, 1 Unix-only skipped, 0 failed.
 
 ## Baseline Capability Audit
 

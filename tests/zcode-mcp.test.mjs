@@ -224,6 +224,33 @@ test("runner invokes only the allowlisted companion command with parsed argument
   assert.deepEqual(result, { code: 0, stdout: "queued\n", stderr: "" });
 });
 
+test("runner isolates session identity across concurrent companion calls", async () => {
+  const env = {
+    CODEX_COMPANION_HOST: "zcode",
+    CODEX_COMPANION_PLUGIN_ROOT: "/plugin",
+    ZCODE_PROJECT_DIR: "/project"
+  };
+  const seen = [];
+  const spawnImpl = (command, args, options) => {
+    seen.push(options.env.CODEX_COMPANION_SESSION_ID);
+    return fakeChild({ stdout: "ok\n" });
+  };
+
+  await Promise.all([
+    runCompanion(
+      { command: "status", arguments: "--json", sessionId: "sess-one" },
+      { env, spawnImpl }
+    ),
+    runCompanion(
+      { command: "status", arguments: "--json", sessionId: "sess-two" },
+      { env, spawnImpl }
+    )
+  ]);
+
+  assert.deepEqual(seen.sort(), ["sess-one", "sess-two"]);
+  assert.equal(env.CODEX_COMPANION_SESSION_ID, undefined);
+});
+
 test("runner rejects unknown commands and invalid input without spawning", async () => {
   let spawnCount = 0;
   const options = {
@@ -409,6 +436,9 @@ test("stdio server initializes, handles notifications and ping, and lists one co
               },
               arguments: {
                 type: "string"
+              },
+              sessionId: {
+                type: "string"
               }
             },
             required: ["command"]
@@ -439,7 +469,8 @@ test("stdio tools/call returns companion stdout as MCP text", async (t) => {
     name: "companion",
     arguments: {
       command: "task-resume-candidate",
-      arguments: "--json"
+      arguments: "--json",
+      sessionId: "sess-mcp-call"
     }
   });
 
@@ -450,7 +481,7 @@ test("stdio tools/call returns companion stdout as MCP text", async (t) => {
   assert.equal(response.result.content[0].type, "text");
   assert.deepEqual(JSON.parse(response.result.content[0].text), {
     available: false,
-    sessionId: null,
+    sessionId: "sess-mcp-call",
     candidate: null
   });
 });

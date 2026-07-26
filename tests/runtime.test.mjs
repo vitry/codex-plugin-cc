@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { getConfig, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -16,6 +16,9 @@ const PLUGIN_VERSION = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, ".claud
 const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
+const ZCODE_SESSION_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "session-lifecycle-hook.mjs");
+const ZCODE_MCP_SESSION_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "mcp-session-hook.mjs");
+const ZCODE_STOP_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "stop-review-gate-hook.mjs");
 
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const start = Date.now();
@@ -744,6 +747,58 @@ test("session start hook exports the Claude session id, transcript path, and plu
     fs.readFileSync(envFile, "utf8"),
     `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CLAUDE_PLUGIN_DATA='${pluginDataDir}'\n`
   );
+});
+
+test("ZCode SessionStart persists lifecycle session metadata", () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+
+  const result = run("node", [ZCODE_SESSION_HOOK, "SessionStart"], {
+    cwd: repo,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_SESSION_ID: "sess-zcode"
+    },
+    input: JSON.stringify({
+      workspacePath: repo,
+      sessionId: "sess-zcode"
+    })
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(getConfig(repo).zcodeSessions["sess-zcode"].startedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("ZCode PreToolUse injects the calling session into companion MCP input", () => {
+  const result = run("node", [ZCODE_MCP_SESSION_HOOK], {
+    cwd: ROOT,
+    env: process.env,
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      sessionId: "sess-zcode-call",
+      toolName: "mcp__codex__companion",
+      toolInput: {
+        command: "status",
+        arguments: "--json",
+        sessionId: "sess-spoofed"
+      }
+    })
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      updatedInput: {
+        command: "status",
+        arguments: "--json",
+        sessionId: "sess-zcode-call"
+      }
+    }
+  });
 });
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {
@@ -2092,7 +2147,7 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
   assert.match(fakeState.lastTurnStart.prompt, /<task>/i);
   assert.match(fakeState.lastTurnStart.prompt, /<compact_output_contract>/i);
-  assert.match(fakeState.lastTurnStart.prompt, /Only review the work from the previous Claude turn/i);
+  assert.match(fakeState.lastTurnStart.prompt, /Only review the work from the previous Claude Code turn/i);
   assert.match(fakeState.lastTurnStart.prompt, /I completed the refactor and updated the retry logic\./);
 
   const status = run("node", [SCRIPT, "status"], {
@@ -2104,6 +2159,46 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
   });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /Codex Stop Gate Review/);
+});
+
+test("ZCode Stop normalizes its payload and preserves the strict block response", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const setup = run("node", [SCRIPT, "setup", "--enable-review-gate", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(setup.status, 0, setup.stderr);
+
+  const blocked = run("node", [ZCODE_STOP_HOOK], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_SESSION_ID: "sess-zcode-stop"
+    },
+    input: JSON.stringify({
+      workspacePath: repo,
+      sessionId: "sess-zcode-stop",
+      response: "I completed the ZCode implementation."
+    })
+  });
+
+  assert.equal(blocked.status, 0, blocked.stderr);
+  assert.deepEqual(Object.keys(JSON.parse(blocked.stdout)).sort(), ["decision", "reason"]);
+  assert.equal(JSON.parse(blocked.stdout).decision, "block");
+  assert.match(JSON.parse(blocked.stdout).reason, /Missing empty-state guard/i);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /previous ZCode turn/i);
+  assert.doesNotMatch(fakeState.lastTurnStart.prompt, /previous Claude/i);
 });
 
 test("stop hook logs running tasks to stderr without blocking when the review gate is disabled", () => {

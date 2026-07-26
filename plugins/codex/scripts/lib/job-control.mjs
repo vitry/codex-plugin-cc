@@ -13,7 +13,8 @@ export function sortJobsNewestFirst(jobs) {
 }
 
 function getCurrentSessionId(options = {}) {
-  return options.env?.[SESSION_ID_ENV] ?? process.env[SESSION_ID_ENV] ?? null;
+  const env = options.env ?? process.env;
+  return env[SESSION_ID_ENV] ?? null;
 }
 
 function filterJobsForCurrentSession(jobs, options = {}) {
@@ -213,7 +214,10 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  const sessionOptions = { ...options, workspaceRoot };
+  const jobs = sortJobsNewestFirst(
+    filterJobsForCurrentSession(listJobs(workspaceRoot), sessionOptions)
+  );
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
@@ -253,9 +257,16 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   };
 }
 
-export function resolveResultJob(cwd, reference) {
+export function resolveResultJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+  const jobs = sortJobsNewestFirst(
+    reference
+      ? listJobs(workspaceRoot)
+      : filterJobsForCurrentSession(listJobs(workspaceRoot), {
+          ...options,
+          workspaceRoot
+        })
+  );
   const selected = matchJobReference(
     jobs,
     reference,
@@ -291,7 +302,8 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     return { workspaceRoot, job: selected };
   }
 
-  const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);
+  const sessionOptions = { ...options, workspaceRoot };
+  const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, sessionOptions);
 
   if (sessionScopedActiveJobs.length === 1) {
     return { workspaceRoot, job: sessionScopedActiveJobs[0] };
@@ -300,7 +312,7 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     throw new Error("Multiple Codex jobs are active. Pass a job id to /codex:cancel.");
   }
 
-  if (getCurrentSessionId(options)) {
+  if (getCurrentSessionId(sessionOptions)) {
     throw new Error("No active Codex jobs to cancel for this session.");
   }
 

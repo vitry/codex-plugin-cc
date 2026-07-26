@@ -36,12 +36,22 @@ function validateInput(input) {
   if (input.arguments !== undefined && typeof input.arguments !== "string") {
     throw new Error("Companion arguments must be a string.");
   }
+  if (input.sessionId !== undefined && typeof input.sessionId !== "string") {
+    throw new Error("Companion sessionId must be a string.");
+  }
 }
 
 export function runCompanion(input, options = {}) {
   validateInput(input);
 
-  const env = options.env ?? process.env;
+  const baseEnv = options.env ?? process.env;
+  const sessionId = input.sessionId?.trim();
+  const env = sessionId
+    ? {
+        ...baseEnv,
+        CODEX_COMPANION_SESSION_ID: sessionId
+      }
+    : baseEnv;
   const host = resolveHost(env, options.cwd ?? process.cwd());
   if (!host.pluginRoot) {
     throw new Error("Codex companion plugin root is not configured.");

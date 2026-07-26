@@ -73,7 +73,7 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous ";
 
 function printUsage() {
   console.log(
@@ -294,12 +294,12 @@ function isActiveJobStatus(status) {
   return status === "queued" || status === "running";
 }
 
-function getCurrentClaudeSessionId() {
+function getCurrentHostSessionId(cwd = process.cwd()) {
   return process.env[SESSION_ID_ENV] ?? null;
 }
 
-function filterJobsForCurrentClaudeSession(jobs) {
-  const sessionId = getCurrentClaudeSessionId();
+function filterJobsForCurrentHostSession(jobs, cwd = process.cwd()) {
+  const sessionId = getCurrentHostSessionId(cwd);
   if (!sessionId) {
     return jobs;
   }
@@ -338,9 +338,9 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId = getCurrentClaudeSessionId();
+  const sessionId = getCurrentHostSessionId(workspaceRoot);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
-  const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
+  const visibleJobs = filterJobsForCurrentHostSession(jobs, workspaceRoot);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
@@ -544,7 +544,7 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
       title: "Codex Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      summary: "Stop-gate review of previous host turn"
     };
   }
 
@@ -1019,8 +1019,11 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const sessionId = getCurrentClaudeSessionId();
-  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
+  const sessionId = getCurrentHostSessionId(workspaceRoot);
+  const jobs = filterJobsForCurrentHostSession(
+    sortJobsNewestFirst(listJobs(workspaceRoot)),
+    workspaceRoot
+  );
   const candidate = findLatestResumableTaskJob(jobs);
 
   const payload = {

@@ -141,7 +141,8 @@ At this Draft milestone, `/codex:transfer` requires an explicit Claude Code tran
 ```
 
 Transferring the current ZCode session is not implemented yet. ZCode lifecycle and review-gate
-hooks are also not active in this milestone.
+hooks are active: `SessionStart` records lifecycle metadata, `PreToolUse` binds each companion MCP
+call to the calling ZCode session, and `Stop` runs the optional review gate.
 
 Remove the development plugin with the supported CLI:
 

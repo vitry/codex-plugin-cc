@@ -2,7 +2,13 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { withJobLock, withJobLockSync } from "./job-lock.mjs";
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  readJobFile,
+  resolveJobFile,
+  resolveJobLogFile,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 

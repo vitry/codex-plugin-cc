@@ -233,7 +233,10 @@ function structuredReviewPayload(prompt) {
 }
 
 function taskPayload(prompt, resume) {
-  if (prompt.includes("<task>") && prompt.includes("Only review the work from the previous Claude turn.")) {
+  if (
+    prompt.includes("<task>") &&
+    /Only review the work from the previous (?:Claude Code|ZCode) turn\./.test(prompt)
+  ) {
     if (BEHAVIOR === "adversarial-clean") {
       return "ALLOW: No blocking issues found in the previous turn.";
     }

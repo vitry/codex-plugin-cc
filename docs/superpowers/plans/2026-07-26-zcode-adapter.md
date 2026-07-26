@@ -425,13 +425,14 @@ Update the PR checklist and test evidence.
 
 - [ ] **Step 1: Write failing ZCode hook contract tests**
 
-Assert only supported ZCode events are registered:
+Assert only the required ZCode events are registered:
 
 ```js
-assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionStart", "Stop"]);
+assert.deepEqual(Object.keys(hooks.hooks).sort(), ["PreToolUse", "SessionStart", "Stop"]);
 ```
 
 Assert hooks use `type: "process"`, `${ZCODE_PLUGIN_ROOT}`, millisecond timeouts, and no `SessionEnd`.
+`PreToolUse` must match only `mcp__codex__companion`.
 
 Add stdin fixture tests for ZCode `SessionStart` and `Stop` payloads, including strict Stop output:
 
@@ -447,7 +448,7 @@ Expected: FAIL because ZCode hooks do not exist and host payload aliases are uns
 
 - [ ] **Step 3: Add thin ZCode hook wrappers**
 
-Map ZCode session/workspace/response fields to the existing runtime hook functions. Persist session identity in the workspace state instead of relying on `CLAUDE_ENV_FILE`. Keep Stop fail-open for unavailable Codex and fail-closed after an actual review starts.
+Map ZCode session/workspace/response fields to the existing runtime hook functions. Persist lifecycle session identity in workspace state instead of relying on `CLAUDE_ENV_FILE`. Because MCP configuration is resolved before a runtime session exists, use `PreToolUse.updatedInput` to inject the calling `sessionId` into each companion tool call; the MCP runner maps that value to `CODEX_COMPANION_SESSION_ID` for only that invocation. Keep Stop fail-open for unavailable Codex and fail-closed after an actual review starts.
 
 Because ZCode has no `SessionEnd`, retain completed artifacts and use stale broker detection plus process exit handling instead of deleting session history at Stop.
 

@@ -1,3 +1,48 @@
 {
-  "hooks": {}
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__codex__companion",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "node",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/mcp-session-hook.mjs"
+            ],
+            "timeoutMs": 5000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "node",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/session-lifecycle-hook.mjs",
+              "SessionStart"
+            ],
+            "timeoutMs": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "node",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/plugins/zcode/scripts/stop-review-gate-hook.mjs"
+            ],
+            "timeoutMs": 960000
+          }
+        ]
+      }
+    ]
+  }
 }

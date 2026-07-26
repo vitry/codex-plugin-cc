@@ -29,6 +29,9 @@ const TOOL = {
       },
       arguments: {
         type: "string"
+      },
+      sessionId: {
+        type: "string"
       }
     },
     required: ["command"]

@@ -17,8 +17,6 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
-
 function readHookInput() {
   const raw = fs.readFileSync(0, "utf8").trim();
   if (!raw) {
@@ -49,11 +47,13 @@ function filterJobsForCurrentSession(jobs, input = {}) {
 function buildStopReviewPrompt(input = {}) {
   const lastAssistantMessage = String(input.last_assistant_message ?? "").trim();
   const template = loadPromptTemplate(ROOT_DIR, "stop-review-gate");
-  const claudeResponseBlock = lastAssistantMessage
-    ? ["Previous Claude response:", lastAssistantMessage].join("\n")
+  const hostName = resolveHost(process.env, input.cwd || process.cwd()).displayName;
+  const hostResponseBlock = lastAssistantMessage
+    ? [`Previous ${hostName} response:`, lastAssistantMessage].join("\n")
     : "";
   return interpolateTemplate(template, {
-    CLAUDE_RESPONSE_BLOCK: claudeResponseBlock
+    HOST_NAME: hostName,
+    HOST_RESPONSE_BLOCK: hostResponseBlock
   });
 }
 

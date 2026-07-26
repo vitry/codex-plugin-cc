@@ -93,7 +93,23 @@ test("ZCode manifest defines the independent Codex plugin", () => {
     }
   });
   assert.equal(manifest.version, packageJson.version);
-  assert.deepEqual(hooks, { hooks: {} });
+  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["PreToolUse", "SessionStart", "Stop"]);
+  for (const event of Object.values(hooks.hooks)) {
+    assert.equal(event.length, 1);
+    assert.equal(event[0].hooks.length, 1);
+    const hook = event[0].hooks[0];
+    assert.equal(hook.type, "process");
+    assert.equal(hook.command, "node");
+    assert.ok(Array.isArray(hook.args));
+    assert.match(hook.args.join(" "), /\$\{ZCODE_PLUGIN_ROOT\}/);
+    assert.equal(Number.isInteger(hook.timeoutMs), true);
+    assert.equal(Object.hasOwn(hook, "timeout"), false);
+  }
+  assert.equal(hooks.hooks.PreToolUse[0].matcher, "mcp__codex__companion");
+  assert.equal(hooks.hooks.Stop[0].hooks[0].timeoutMs, 960000);
+  const stopWrapper = read("plugins/zcode/scripts/stop-review-gate-hook.mjs");
+  assert.match(stopWrapper, /WRAPPER_TIMEOUT_MS\s*=\s*930000/);
+  assert.match(read("plugins/codex/scripts/stop-review-gate-hook.mjs"), /15 \* 60 \* 1000/);
 });
 
 test("ZCode marketplace exposes one repository-root plugin", () => {

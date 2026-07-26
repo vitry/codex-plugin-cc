@@ -1838,6 +1838,8 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   const launchPayload = JSON.parse(launched.stdout);
   const jobId = launchPayload.jobId;
   assert.ok(jobId);
+  await waitFor(() => loadBrokerSession(repo), { timeoutMs: 15000 });
+  assert.ok(loadBrokerSession(repo), "broker interruption coverage requires an active broker");
 
   const stateDir = resolveStateDir(repo);
   const runningJob = await waitFor(() => {

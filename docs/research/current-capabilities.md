@@ -7,6 +7,10 @@ branch was `main`, but `main`, local `zcode-adapter`, `origin/main`, and
 `origin/zcode-adapter` all pointed to that same commit when the research was
 performed.
 
+This is intentionally the pre-adaptation baseline. The implemented ZCode
+mapping and installed-runtime evidence are recorded in
+`docs/verification/zcode-0.15.2.md`.
+
 Primary evidence:
 
 - Product surface: `README.md`, `.claude-plugin/marketplace.json`,

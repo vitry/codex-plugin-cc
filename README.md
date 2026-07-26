@@ -1,9 +1,9 @@
-# Codex plugin for Claude Code
+# Codex plugin for Claude Code and ZCode
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use Codex from inside Claude Code or ZCode for code reviews and delegated tasks.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
-they already have.
+The host handles the conversation and command UI. Codex remains the execution engine for reviews,
+rescue tasks, session transfer, and the optional stop-time review gate.
 
 <video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
@@ -72,10 +72,10 @@ One simple first run is:
 /codex:result
 ```
 
-## ZCode Local Development Install (Draft)
+## ZCode Local Development Install
 
-The ZCode adapter is under active development. These instructions install the plugin from this
-worktree without changing the Claude Code installation described above.
+These instructions were verified with ZCode Desktop 3.3.6 and its bundled CLI 0.15.2. They install
+the plugin from this worktree without changing the Claude Code installation described above.
 
 ZCode 0.15.2 supports listing, enabling, disabling, and uninstalling plugins from its CLI. Adding a
 local marketplace and installing from it are currently **ZCode Protocol-only** operations; they are
@@ -107,6 +107,14 @@ The local marketplace is the repository-root `marketplace.json`, not a file insi
 zcode plugins enable codex@openai-codex
 ```
 
+For repeated local installs, call Protocol method `plugins/marketplace/update` before reinstalling.
+ZCode caches plugin source by marketplace and version, so an unchanged version can otherwise reuse
+an older worktree snapshot. Uninstalling first is the most deterministic development refresh:
+
+```bash
+zcode plugins uninstall codex@openai-codex --force
+```
+
 Confirm that ZCode discovers the enabled plugin and commands:
 
 ```bash
@@ -133,6 +141,11 @@ review to verify the MCP bridge:
 /codex:setup
 /codex:review
 ```
+
+ZCode itself must have an explicit model provider before it can execute slash commands in headless
+or interactive sessions. This is separate from the Codex authentication checked by
+`/codex:setup`. If ZCode reports that model config is missing, configure the provider in ZCode
+before testing the command layer.
 
 `/codex:transfer` imports the current ZCode session into a persistent Codex thread:
 
@@ -209,7 +222,8 @@ This command is read-only. It does not fix code.
 
 ### `/codex:rescue`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+Hands a task to Codex. Claude Code routes through its registered rescue subagent; ZCode calls the
+companion MCP directly because ZCode 0.15.2 treats plugin agents as diagnostic-only.
 
 Use it when you want Codex to:
 
@@ -323,10 +337,12 @@ You can also use `/codex:setup` to manage the optional review gate.
 /codex:setup --disable-review-gate
 ```
 
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
+When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based
+on the host's previous response. If that review finds issues, the stop is blocked so the host can
+address them first.
 
 > [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+> The review gate can create a long-running host/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
 
 ## Typical Flows
 
@@ -362,7 +378,7 @@ The Codex plugin wraps the [Codex app server](https://developers.openai.com/code
 
 ### Common Configurations
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
+If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you opened in your host:
 
 ```toml
 model = "gpt-5.4-mini"
@@ -389,7 +405,11 @@ This way you can review the Codex work or continue the work there.
 
 If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
 
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
+If you only use a host client today and have not used Codex yet, you will also need to sign in to
+Codex with either a ChatGPT account or an API key.
+[Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing),
+and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both
+ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready.
 
 ### Does the plugin use a separate Codex runtime?
 

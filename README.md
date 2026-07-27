@@ -135,6 +135,9 @@ commands:
 - `/codex:result`
 - `/codex:cancel`
 
+ZCode commands are namespaced as `/codex:*` to avoid collisions with built-in, workspace, and
+other plugin commands. The plugin does not install unprefixed aliases such as `/setup`.
+
 Start a new ZCode session after changing plugin enablement. Then run `/codex:setup` and a read-only
 review to verify the MCP bridge:
 

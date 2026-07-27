@@ -44,7 +44,7 @@ function readJson(relativePath) {
 }
 
 function commandSource(name) {
-  return read(`plugins/zcode/commands/${name}.md`);
+  return read(`plugins/zcode/commands/codex/${name}.md`);
 }
 
 function frontmatterEntries(source) {
@@ -131,6 +131,13 @@ test("ZCode marketplace exposes one repository-root plugin", () => {
   });
 });
 
+test("ZCode documentation requires the codex namespace without aliases", () => {
+  const readme = read("README.md");
+
+  assert.match(readme, /ZCode commands are namespaced as `\/codex:\*`/);
+  assert.match(readme, /does not install unprefixed aliases such as `\/setup`/);
+});
+
 test("ZCode transfer enables the Node 22.5 SQLite implementation", () => {
   assert.match(
     read("plugins/codex/scripts/lib/zcode-session-transfer.mjs"),
@@ -138,15 +145,21 @@ test("ZCode transfer enables the Node 22.5 SQLite implementation", () => {
   );
 });
 
-test("ZCode exposes the exact static command set with recognized frontmatter", () => {
+test("ZCode exposes the exact codex-namespaced command set with recognized frontmatter", () => {
   const commandsRoot = path.join(ROOT, "plugins", "zcode", "commands");
+  const namespaceRoot = path.join(commandsRoot, "codex");
   const commandNames = fs
-    .readdirSync(commandsRoot)
+    .readdirSync(namespaceRoot)
     .filter((file) => file.endsWith(".md"))
     .map((file) => path.basename(file, ".md"))
     .sort();
 
   assert.deepEqual(commandNames, COMMAND_NAMES);
+  assert.deepEqual(
+    fs.readdirSync(commandsRoot).filter((file) => file.endsWith(".md")),
+    [],
+    "unprefixed command aliases must not remain"
+  );
 
   for (const commandName of commandNames) {
     const source = commandSource(commandName);

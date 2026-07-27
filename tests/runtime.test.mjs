@@ -217,6 +217,89 @@ test("review renders a no-findings result from app-server review/start", () => {
   assert.match(result.stdout, /No material issues found/);
 });
 
+test("ZCode review selects the only nested Git repository", () => {
+  const workspace = makeTempDir();
+  const repo = path.join(workspace, "demo");
+  const binDir = makeTempDir();
+  fs.mkdirSync(repo);
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+  run("git", ["add", "app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: workspace,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace,
+      ZCODE_PLUGIN_DATA: path.join(workspace, ".plugin-data")
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Reviewed uncommitted changes/);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(fakeState.threads[0].cwd, fs.realpathSync(repo));
+});
+
+test("ZCode review reports nested repository candidates when selection is ambiguous", () => {
+  const workspace = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  for (const name of ["api", "web"]) {
+    const repo = path.join(workspace, name);
+    fs.mkdirSync(repo);
+    initGitRepo(repo);
+  }
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: workspace,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace
+    }
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Multiple Git repositories/);
+  assert.match(result.stderr, /\bapi\b/);
+  assert.match(result.stderr, /\bweb\b/);
+  assert.match(result.stderr, /--cwd <path>/);
+});
+
+test("ZCode review keeps explicit --cwd authoritative in a multi-repository workspace", () => {
+  const workspace = makeTempDir();
+  const selectedRepo = path.join(workspace, "api");
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  for (const name of ["api", "web"]) {
+    const repo = path.join(workspace, name);
+    fs.mkdirSync(repo);
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+    run("git", ["add", "app.js"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
+  }
+  fs.writeFileSync(path.join(selectedRepo, "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review", "--cwd", "api"], {
+    cwd: workspace,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(fakeState.threads[0].cwd, fs.realpathSync(selectedRepo));
+});
+
 test("task runs when the active provider does not require OpenAI login", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

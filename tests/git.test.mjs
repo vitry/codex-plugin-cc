@@ -3,8 +3,57 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
+import {
+  collectReviewContext,
+  resolveReviewCwd,
+  resolveReviewTarget
+} from "../plugins/codex/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+
+test("resolveReviewCwd preserves an existing repository", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+
+  assert.equal(resolveReviewCwd(cwd, { discoverNested: true }), cwd);
+});
+
+test("resolveReviewCwd selects the only nested repository", () => {
+  const cwd = makeTempDir();
+  const repository = path.join(cwd, "demo");
+  fs.mkdirSync(repository);
+  initGitRepo(repository);
+
+  assert.equal(resolveReviewCwd(cwd, { discoverNested: true }), repository);
+});
+
+test("resolveReviewCwd reports all nested repositories when selection is ambiguous", () => {
+  const cwd = makeTempDir();
+  for (const name of ["api", "web"]) {
+    const repository = path.join(cwd, name);
+    fs.mkdirSync(repository);
+    initGitRepo(repository);
+  }
+
+  assert.throws(
+    () => resolveReviewCwd(cwd, { discoverNested: true }),
+    (error) => {
+      assert.match(error.message, /Multiple Git repositories/);
+      assert.match(error.message, /\bapi\b/);
+      assert.match(error.message, /\bweb\b/);
+      assert.match(error.message, /--cwd <path>/);
+      return true;
+    }
+  );
+});
+
+test("resolveReviewCwd preserves the existing error when no repository exists", () => {
+  const cwd = makeTempDir();
+
+  assert.throws(
+    () => resolveReviewCwd(cwd, { discoverNested: true }),
+    /This command must run inside a Git repository\./
+  );
+});
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   const cwd = makeTempDir();

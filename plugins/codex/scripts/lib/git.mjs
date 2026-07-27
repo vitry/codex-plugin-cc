@@ -7,6 +7,19 @@ import { formatCommandFailure, runCommand, runCommandChecked } from "./process.m
 const MAX_UNTRACKED_BYTES = 24 * 1024;
 const DEFAULT_INLINE_DIFF_MAX_FILES = 2;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
+const MAX_NESTED_REPOSITORY_DEPTH = 4;
+const NESTED_REPOSITORY_IGNORES = new Set([
+  ".claude",
+  ".git",
+  ".next",
+  ".zcode",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "target",
+  "vendor"
+]);
 
 // Git is directly executable on Windows. Repository-derived arguments must never pass through a shell.
 function git(cwd, args, options = {}) {
@@ -15,6 +28,47 @@ function git(cwd, args, options = {}) {
 
 function gitChecked(cwd, args, options = {}) {
   return runCommandChecked("git", args, { cwd, ...options, shell: false });
+}
+
+function isGitRepositoryContext(cwd) {
+  const result = git(cwd, ["rev-parse", "--show-toplevel"]);
+  const errorCode = result.error && "code" in result.error ? result.error.code : null;
+  if (errorCode === "ENOENT") {
+    throw new Error("git is not installed. Install Git and retry.");
+  }
+  return result.status === 0;
+}
+
+function findNestedGitRepositories(root) {
+  const repositories = [];
+
+  function visit(directory, depth) {
+    if (depth > MAX_NESTED_REPOSITORY_DEPTH) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    if (entries.some((entry) => entry.name === ".git" && (entry.isDirectory() || entry.isFile()))) {
+      repositories.push(directory);
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || NESTED_REPOSITORY_IGNORES.has(entry.name)) {
+        continue;
+      }
+      visit(path.join(directory, entry.name), depth + 1);
+    }
+  }
+
+  visit(root, 0);
+  return repositories.sort();
 }
 
 function listUniqueFiles(...groups) {
@@ -76,15 +130,32 @@ function buildBranchComparison(cwd, baseRef) {
 }
 
 export function ensureGitRepository(cwd) {
-  const result = git(cwd, ["rev-parse", "--show-toplevel"]);
-  const errorCode = result.error && "code" in result.error ? result.error.code : null;
-  if (errorCode === "ENOENT") {
-    throw new Error("git is not installed. Install Git and retry.");
-  }
-  if (result.status !== 0) {
+  if (!isGitRepositoryContext(cwd)) {
     throw new Error("This command must run inside a Git repository.");
   }
-  return result.stdout.trim();
+  return getRepoRoot(cwd);
+}
+
+export function resolveReviewCwd(cwd, options = {}) {
+  if (isGitRepositoryContext(cwd)) {
+    return cwd;
+  }
+  if (!options.discoverNested) {
+    throw new Error("This command must run inside a Git repository.");
+  }
+
+  const repositories = findNestedGitRepositories(cwd);
+  if (repositories.length === 1) {
+    return repositories[0];
+  }
+  if (repositories.length > 1) {
+    const candidates = repositories.map((repository) => path.relative(cwd, repository) || ".").join(", ");
+    throw new Error(
+      `Multiple Git repositories found in this workspace: ${candidates}. Rerun with --cwd <path> to select one.`
+    );
+  }
+
+  throw new Error("This command must run inside a Git repository.");
 }
 
 export function getRepoRoot(cwd) {

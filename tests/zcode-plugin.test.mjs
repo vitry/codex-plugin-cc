@@ -210,6 +210,7 @@ test("ZCode review commands preserve target, execution, and read-only semantics"
     assert.match(source, /--background/);
     assert.match(source, /--base <ref>/);
     assert.match(source, /--scope auto\|working-tree\|branch/);
+    assert.match(source, /--cwd <path>/);
     assert.match(source, /read-only|review-only/i);
     assert.match(source, /Do not (?:fix|edit|modify|apply)/i);
     assert.match(source, /verbatim/i);
@@ -217,6 +218,9 @@ test("ZCode review commands preserve target, execution, and read-only semantics"
     assert.match(source, /branch/i);
     assert.match(source, /staged/i);
     assert.match(source, /unstaged/i);
+    assert.match(source, /If the MCP call fails.*return.*verbatim/is);
+    assert.match(source, /Do not invoke raw `codex`/i);
+    assert.match(source, /Do not redirect.*temporary file/i);
   }
 
   assert.match(review, /does not accept extra focus text/i);

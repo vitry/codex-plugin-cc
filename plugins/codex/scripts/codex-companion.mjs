@@ -23,7 +23,12 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import {
+  collectReviewContext,
+  ensureGitRepository,
+  resolveReviewCwd,
+  resolveReviewTarget
+} from "./lib/git.mjs";
 import { resolveHost } from "./lib/host.mjs";
 import { withJobLock } from "./lib/job-lock.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -84,8 +89,8 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--cwd <path>]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--cwd <path>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl|zcode-session|sqlite[#session]>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
@@ -763,8 +768,12 @@ async function handleReviewCommand(argv, config) {
     }
   });
 
-  const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
+  const requestedCwd = resolveCommandCwd(options);
+  const host = resolveHost(process.env, requestedCwd);
+  const cwd = resolveReviewCwd(requestedCwd, {
+    discoverNested: host.kind === "zcode" && !options.cwd
+  });
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
@@ -781,7 +790,7 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
-  if (options.background && resolveHost(process.env, cwd).kind === "zcode") {
+  if (options.background && host.kind === "zcode") {
     ensureCodexAvailable(cwd);
     const request = {
       cwd,

@@ -197,7 +197,11 @@ Use it when you want:
 - a review of your current uncommitted changes
 - a review of your branch compared to a base branch like `main`
 
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
+Use `--base <ref>` for branch review. It also supports `--wait`, `--background`, and `--cwd <path>`.
+In ZCode, a workspace containing exactly one nested Git repository selects it automatically; use
+`--cwd <path>` when the workspace contains multiple repositories. The command is not steerable and
+does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when
+you want to challenge a specific decision or risk area.
 
 Examples:
 
@@ -205,6 +209,7 @@ Examples:
 /codex:review
 /codex:review --base main
 /codex:review --background
+/codex:review --wait --cwd demo
 ```
 
 This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
@@ -215,8 +220,9 @@ Runs a **steerable** review that questions the chosen implementation and design.
 
 It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch
+review and `--cwd <path>` for repository selection. It also supports `--wait` and `--background`.
+Unlike `/codex:review`, it can take extra focus text after the flags.
 
 Use it when you want:
 

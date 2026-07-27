@@ -2,16 +2,16 @@
 
 ## Scope
 
-- Date: 2026-07-27
-- Runtime source commit: `f7088d6`
+- Date: 2026-07-28
+- Runtime source commit: `1f24ded`
 - Branch and PR: `zcode-adapter`, `vitry/codex-plugin-cc#1`
 - ZCode Desktop: 3.3.6
 - ZCode CLI: 0.15.2
 - Platform: macOS arm64
 - Node.js: 24.14.0
 - Codex CLI: 0.145.0
-- Plugin: `codex@openai-codex` 1.1.0
-- Installed root: `~/.zcode/cli/plugins/cache/openai-codex/codex/1.1.0`
+- Plugin: `codex@openai-codex` 1.1.1
+- Installed root: `~/.zcode/cli/plugins/cache/openai-codex/codex/1.1.1`
 
 Sensitive session, job, thread, account, and temporary path values are redacted
 below. The installed `plugins/codex` and `plugins/zcode` trees were compared
@@ -31,7 +31,7 @@ records and logs were located at:
 
 The local repository-root `marketplace.json` was registered as
 `openai-codex`. Protocol calls `plugins/marketplace/update` and
-`plugins/install` installed version 1.1.0 with no diagnostics.
+`plugins/install` installed version 1.1.1 with no diagnostics.
 
 Installed discovery results:
 
@@ -47,7 +47,7 @@ Installed discovery results:
 - `mcp/list` with `mode: connect`: `plugin:codex:codex` connected over stdio
   with one tool.
 - MCP initialization: protocol `2024-11-05`, server
-  `codex-companion-zcode` 1.1.0.
+  `codex-companion-zcode` 1.1.1.
 
 For repeated development installs, the marketplace must be updated before
 install. ZCode caches source by marketplace and version; uninstalling the
@@ -77,7 +77,7 @@ development plugin before reinstalling gives a deterministic refresh.
 
 Before installed-runtime verification:
 
-- Full test suite: 197 tests, 193 passed, 4 Windows-only skipped, 0 failed.
+- Full test suite: 208 tests, 204 passed, 4 Windows-only skipped, 0 failed.
 - ZCode-focused namespace suite: 9 passed, 0 failed.
 - `npm run build`: passed.
 - `npm run check-version`: passed for 1.1.0.
@@ -187,6 +187,33 @@ Running `zcode --prompt '/codex:status --all'` on this machine stops before
 command dispatch because `~/.zcode/cli/config.json` has no explicit ZCode model
 provider. Interactive execution can be checked after configuring a Z.AI model
 provider; this does not affect command discovery or the installed MCP runtime.
+
+## Nested Repository Review Fix
+
+ZCode Protocol refreshed the local `openai-codex` marketplace, uninstalled
+version 1.1.0, and installed version 1.1.1 from commit `1f24ded`. The installed
+cache was compared against all 104 tracked source files: zero files were
+missing and zero differed.
+
+Installed command discovery returned the same eight `codex:*` commands.
+`codex:review` and `codex:adversarial-review` both advertised
+`[--cwd <path>]`. Plugin discovery reported the plugin enabled with three
+skills, three runnable hooks, and one connected MCP server.
+
+The installed MCP was then started from a disposable workspace that was not a
+Git repository and contained one nested dirty repository named `demo`. A
+foreground `review --wait --scope working-tree` call:
+
+- initialized `codex-companion-zcode` version 1.1.1;
+- listed the `companion` MCP tool;
+- automatically selected the nested repository;
+- returned `isError: false`;
+- returned the complete `# Codex Review` report directly in MCP text content.
+
+No temporary-file transport or raw Codex fallback was used. Automated
+regressions additionally cover an ambiguous two-repository workspace,
+explicit `--cwd` relative to `ZCODE_PROJECT_DIR`, invalid `.git` markers, and
+quoted and unquoted Windows paths.
 
 ## Known Host Limitation
 

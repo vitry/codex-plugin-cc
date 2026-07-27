@@ -2,8 +2,8 @@
 
 ## Scope
 
-- Date: 2026-07-26
-- Runtime source commit: `df1d88a`
+- Date: 2026-07-27
+- Runtime source commit: `f7088d6`
 - Branch and PR: `zcode-adapter`, `vitry/codex-plugin-cc#1`
 - ZCode Desktop: 3.3.6
 - ZCode CLI: 0.15.2
@@ -40,8 +40,10 @@ Installed discovery results:
 - `plugins/describe`: eight commands, three skills, three hooks, and one MCP
   server. No plugin agent is declared because ZCode 0.15.2 treats that
   component as diagnostic-only.
-- `commands list --json`: `setup`, `review`, `adversarial-review`, `rescue`,
-  `transfer`, `status`, `result`, and `cancel`.
+- `commands list --json`: `codex:setup`, `codex:review`,
+  `codex:adversarial-review`, `codex:rescue`, `codex:transfer`,
+  `codex:status`, `codex:result`, and `codex:cancel`. No unprefixed plugin
+  command remains.
 - `mcp/list` with `mode: connect`: `plugin:codex:codex` connected over stdio
   with one tool.
 - MCP initialization: protocol `2024-11-05`, server
@@ -69,14 +71,14 @@ development plugin before reinstalling gives a deterministic refresh.
 | Stop enabled/block | After an edit introduced invalid JavaScript and the previous host response identified that edit, the hook emitted `decision: block` with the syntax defect. | Pass |
 | Stop enabled/allow | After fixing the syntax defect, the hook emitted no block decision and exited successfully. | Pass |
 | Shared broker | Review and rescue used the identity-bound shared broker; final lease release acknowledged shutdown, observed exit, and finalized state. | Pass |
-| Slash-command dispatch | A headless `/codex:status --all` turn expanded the installed command, exposed the installed companion MCP tool to the model, executed the model's tool call, returned the tool result to the model, and completed the turn. | Pass |
+| Slash-command registration | Installed discovery returned exactly the eight `/codex:*` commands with no unprefixed aliases; the installed companion MCP completed `status --all`. | Pass |
 
 ## Automated Verification
 
 Before installed-runtime verification:
 
-- Full test suite: 196 tests, 192 passed, 4 Windows-only skipped, 0 failed.
-- ZCode-focused suite after direct-rescue adaptation: 37 passed, 0 failed.
+- Full test suite: 197 tests, 193 passed, 4 Windows-only skipped, 0 failed.
+- ZCode-focused namespace suite: 9 passed, 0 failed.
 - `npm run build`: passed.
 - `npm run check-version`: passed for 1.1.0.
 - `git diff --check`: passed.
@@ -131,15 +133,18 @@ and after repair with no block decision.
 
 ## Exact-Commit Reverification
 
-After the final code-review fixes, ZCode Protocol refreshed the local
-marketplace, removed the old cache, and installed commit `df1d88a` again.
+After the namespace migration, ZCode Protocol refreshed the local marketplace,
+removed the old cache, and installed commit `f7088d6` again.
 Source/cache comparisons for `.zcode-plugin`, `plugins/zcode`,
 `plugins/codex/scripts`, and `marketplace.json` had no differences.
 
 The exact installed cache was then exercised again:
 
-- discovery returned zero diagnostics, eight commands, three skills, three
-  runnable hooks, and one connected MCP server;
+- discovery returned zero diagnostics, exactly eight `codex:*` commands, no
+  unprefixed aliases, three skills, three runnable hooks, and one MCP server;
+- the installed MCP initialized as `codex-companion-zcode` 1.1.0, listed the
+  `companion` tool, and completed `status --all` with a `# Codex Status`
+  response;
 - the registered PreToolUse matcher was
   `^mcp__(?:plugin_codex_)?codex__companion$`, and the installed hook injected
   the session into the production MCP tool name;
@@ -153,10 +158,6 @@ The exact installed cache was then exercised again:
   not create its delayed output;
 - the enabled Stop gate blocked deliberately invalid JavaScript and emitted no
   block decision after repair; the gate was disabled again after the test;
-- the model-driven `/codex:status --all` path made three model requests,
-  expanded the command, called
-  `mcp__plugin_codex_codex__companion`, delivered its result, and emitted
-  `turn.completed` with no last error.
 
 ## Baseline Capability Audit
 
@@ -179,27 +180,13 @@ both automated coverage and installed ZCode evidence:
 Claude Code packaging and commands remain covered by the original command,
 runtime, and manifest tests.
 
-## Model-Driven Command Verification
+## Headless Command Limitation
 
-This machine's ZCode CLI has no explicit ZCode model provider in
-`~/.zcode/cli/config.json`. The model-driven dispatcher was therefore verified
-without changing account or user configuration: ZCode Protocol `session/create`
-received an ephemeral OpenAI-compatible `runtimeModel` pointing to a loopback
-test server with a non-secret placeholder key.
-
-The test sent `/codex:status --all` through `session/send` and observed:
-
-1. ZCode expanded the installed command body into the model request.
-2. The request exposed 16 tools, including the installed plugin tool
-   `mcp__plugin_codex_codex__companion`.
-3. The test model called that tool with `{"command":"status","arguments":"--all"}`.
-4. ZCode executed the plugin MCP call and included its tool result in the next
-   model request.
-5. The session emitted `turn.completed` with no last error.
-
-This verifies command discovery, command expansion, model tool selection,
-plugin MCP dispatch, tool-result delivery, and turn completion independently
-of a user's Z.AI credentials.
+The installed command files and companion MCP were verified independently.
+Running `zcode --prompt '/codex:status --all'` on this machine stops before
+command dispatch because `~/.zcode/cli/config.json` has no explicit ZCode model
+provider. Interactive execution can be checked after configuring a Z.AI model
+provider; this does not affect command discovery or the installed MCP runtime.
 
 ## Known Host Limitation
 

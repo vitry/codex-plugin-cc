@@ -10,6 +10,7 @@
 - Harden shared state and broker lifecycle with cross-process locks, instance identity, session
   leases, bounded shutdown, crash cleanup, and Windows lock coverage.
 - Run ZCode rescue directly through the companion MCP instead of unsupported plugin agents.
+- Namespace every ZCode slash command as `/codex:*` without unprefixed aliases.
 
 ## 1.0.0
 

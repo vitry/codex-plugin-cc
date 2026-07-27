@@ -242,7 +242,7 @@ test("ZCode review selects the only nested Git repository", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Reviewed uncommitted changes/);
   const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
-  assert.equal(fakeState.threads[0].cwd, fs.realpathSync(repo));
+  assert.equal(fs.realpathSync(fakeState.threads[0].cwd), fs.realpathSync(repo));
 });
 
 test("ZCode review reports nested repository candidates when selection is ambiguous", () => {
@@ -273,6 +273,7 @@ test("ZCode review reports nested repository candidates when selection is ambigu
 
 test("ZCode review keeps explicit --cwd authoritative in a multi-repository workspace", () => {
   const workspace = makeTempDir();
+  const processCwd = makeTempDir();
   const selectedRepo = path.join(workspace, "api");
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -287,7 +288,7 @@ test("ZCode review keeps explicit --cwd authoritative in a multi-repository work
   fs.writeFileSync(path.join(selectedRepo, "app.js"), "export const value = 2;\n");
 
   const result = run("node", [SCRIPT, "review", "--cwd", "api"], {
-    cwd: workspace,
+    cwd: processCwd,
     env: {
       ...buildEnv(binDir),
       CODEX_COMPANION_HOST: "zcode",
@@ -297,7 +298,7 @@ test("ZCode review keeps explicit --cwd authoritative in a multi-repository work
 
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
-  assert.equal(fakeState.threads[0].cwd, fs.realpathSync(selectedRepo));
+  assert.equal(fs.realpathSync(fakeState.threads[0].cwd), fs.realpathSync(selectedRepo));
 });
 
 test("task runs when the active provider does not require OpenAI login", () => {

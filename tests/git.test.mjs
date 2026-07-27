@@ -26,6 +26,17 @@ test("resolveReviewCwd selects the only nested repository", () => {
   assert.equal(resolveReviewCwd(cwd, { discoverNested: true }), repository);
 });
 
+test("resolveReviewCwd ignores invalid nested .git markers", () => {
+  const cwd = makeTempDir();
+  const repository = path.join(cwd, "demo");
+  const invalid = path.join(cwd, "copied-files");
+  fs.mkdirSync(repository);
+  fs.mkdirSync(path.join(invalid, ".git"), { recursive: true });
+  initGitRepo(repository);
+
+  assert.equal(resolveReviewCwd(cwd, { discoverNested: true }), repository);
+});
+
 test("resolveReviewCwd reports all nested repositories when selection is ambiguous", () => {
   const cwd = makeTempDir();
   for (const name of ["api", "web"]) {

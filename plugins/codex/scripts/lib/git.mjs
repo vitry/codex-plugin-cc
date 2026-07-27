@@ -144,7 +144,9 @@ export function resolveReviewCwd(cwd, options = {}) {
     throw new Error("This command must run inside a Git repository.");
   }
 
-  const repositories = findNestedGitRepositories(cwd);
+  const repositories = findNestedGitRepositories(cwd).filter((repository) =>
+    isGitRepositoryContext(repository)
+  );
   if (repositories.length === 1) {
     return repositories[0];
   }

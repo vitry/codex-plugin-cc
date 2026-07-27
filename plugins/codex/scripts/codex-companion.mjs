@@ -768,8 +768,9 @@ async function handleReviewCommand(argv, config) {
     }
   });
 
-  const requestedCwd = resolveCommandCwd(options);
-  const host = resolveHost(process.env, requestedCwd);
+  const host = resolveHost(process.env, process.cwd());
+  const baseCwd = host.kind === "zcode" ? path.resolve(host.projectDir) : process.cwd();
+  const requestedCwd = options.cwd ? path.resolve(baseCwd, options.cwd) : baseCwd;
   const cwd = resolveReviewCwd(requestedCwd, {
     discoverNested: host.kind === "zcode" && !options.cwd
   });

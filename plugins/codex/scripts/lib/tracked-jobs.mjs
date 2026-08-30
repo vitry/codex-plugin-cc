@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { withJobLock, withJobLockSync } from "./job-lock.mjs";
+import {
+  readJobFile,
+  resolveJobFile,
+  resolveJobLogFile,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
@@ -99,17 +106,20 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    upsertJob(workspaceRoot, patch);
-
-    const jobFile = resolveJobFile(workspaceRoot, jobId);
-    if (!fs.existsSync(jobFile)) {
-      return;
-    }
-
-    const storedJob = readJobFile(jobFile);
-    writeJobFile(workspaceRoot, jobId, {
-      ...storedJob,
-      ...patch
+    withJobLockSync(workspaceRoot, jobId, () => {
+      const jobFile = resolveJobFile(workspaceRoot, jobId);
+      if (!fs.existsSync(jobFile)) {
+        return;
+      }
+      const storedJob = readJobFile(jobFile);
+      if (storedJob.status === "cancelled") {
+        return;
+      }
+      upsertJob(workspaceRoot, patch);
+      writeJobFile(workspaceRoot, jobId, {
+        ...storedJob,
+        ...patch
+      });
     });
   };
 }
@@ -139,6 +149,27 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+export async function failQueuedJob(job, errorMessage) {
+  return withJobLock(job.workspaceRoot, job.id, () => {
+    const existing = readStoredJobOrNull(job.workspaceRoot, job.id);
+    if (existing?.status !== "queued") {
+      return false;
+    }
+    const completedAt = nowIso();
+    const failedRecord = {
+      ...existing,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt,
+      errorMessage
+    };
+    writeJobFile(job.workspaceRoot, job.id, failedRecord);
+    upsertJob(job.workspaceRoot, failedRecord);
+    return true;
+  });
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const runningRecord = {
     ...job,
@@ -148,56 +179,78 @@ export async function runTrackedJob(job, runner, options = {}) {
     pid: process.pid,
     logFile: options.logFile ?? job.logFile ?? null
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
-  upsertJob(job.workspaceRoot, runningRecord);
+  const started = await withJobLock(job.workspaceRoot, job.id, () => {
+    const existing = readStoredJobOrNull(job.workspaceRoot, job.id);
+    if (options.expectedStatus && existing?.status !== options.expectedStatus) {
+      return false;
+    }
+    writeJobFile(job.workspaceRoot, job.id, runningRecord);
+    upsertJob(job.workspaceRoot, runningRecord);
+    return true;
+  });
+  if (!started) {
+    return null;
+  }
+  options.onStarted?.();
 
   try {
     const execution = await runner();
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...runningRecord,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      pid: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      completedAt,
-      result: execution.payload,
-      rendered: execution.rendered
-    });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      summary: execution.summary,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
-      completedAt
+    await withJobLock(job.workspaceRoot, job.id, () => {
+      const existing = readStoredJobOrNull(job.workspaceRoot, job.id);
+      if (existing?.status !== "running") {
+        return;
+      }
+      writeJobFile(job.workspaceRoot, job.id, {
+        ...runningRecord,
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        pid: null,
+        phase: completionStatus === "completed" ? "done" : "failed",
+        completedAt,
+        result: execution.payload,
+        rendered: execution.rendered
+      });
+      upsertJob(job.workspaceRoot, {
+        id: job.id,
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        summary: execution.summary,
+        phase: completionStatus === "completed" ? "done" : "failed",
+        pid: null,
+        completedAt
+      });
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...existing,
-      status: "failed",
-      phase: "failed",
-      errorMessage,
-      pid: null,
-      completedAt,
-      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
-    });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage,
-      completedAt
+    await withJobLock(job.workspaceRoot, job.id, () => {
+      const existing = readStoredJobOrNull(job.workspaceRoot, job.id);
+      if (existing?.status !== "running") {
+        return;
+      }
+      writeJobFile(job.workspaceRoot, job.id, {
+        ...existing,
+        status: "failed",
+        phase: "failed",
+        errorMessage,
+        pid: null,
+        completedAt,
+        logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
+      });
+      upsertJob(job.workspaceRoot, {
+        id: job.id,
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        errorMessage,
+        completedAt
+      });
     });
     throw error;
   }

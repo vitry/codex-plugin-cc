@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -10,6 +11,10 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
+const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 1000;
+let cleanupFailureArtifacts = () => {};
+process.once("exit", () => cleanupFailureArtifacts());
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -37,12 +42,50 @@ function isInterruptRequest(message) {
   return message?.method === "turn/interrupt";
 }
 
-function writePidFile(pidFile) {
+function writePidFile(pidFile, instanceId) {
   if (!pidFile) {
     return;
   }
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
+  fs.writeFileSync(
+    pidFile,
+    `${JSON.stringify({ pid: process.pid, instanceId })}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+function removeOwnedPidFile(pidFile, instanceId) {
+  if (!pidFile || !fs.existsSync(pidFile)) {
+    return;
+  }
+  const quarantineFile = `${pidFile}.release-${process.pid}-${randomUUID()}`;
+  try {
+    fs.renameSync(pidFile, quarantineFile);
+    const owner = JSON.parse(fs.readFileSync(quarantineFile, "utf8"));
+    if (owner?.instanceId === instanceId) {
+      fs.unlinkSync(quarantineFile);
+      return;
+    }
+  } catch {
+    // A missing, malformed, or replaced PID file is not ours to remove.
+  }
+  if (fs.existsSync(quarantineFile)) {
+    try {
+      fs.renameSync(quarantineFile, pidFile);
+    } catch {
+      // Preserve an unexpected file in quarantine if its path was replaced.
+    }
+  }
+}
+
+async function settleWithin(promise, timeoutMs) {
+  await Promise.race([
+    Promise.resolve(promise).catch(() => {}),
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+    })
+  ]);
 }
 
 async function main() {
@@ -52,7 +95,7 @@ async function main() {
   }
 
   const { options } = parseArgs(argv, {
-    valueOptions: ["cwd", "pid-file", "endpoint"]
+    valueOptions: ["cwd", "pid-file", "endpoint", "instance-id"]
   });
 
   if (!options.endpoint) {
@@ -63,12 +106,37 @@ async function main() {
   const endpoint = String(options.endpoint);
   const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
-  writePidFile(pidFile);
+  const instanceId = String(options["instance-id"] ?? "");
+  if (!instanceId) {
+    throw new Error("Missing required --instance-id.");
+  }
+  cleanupFailureArtifacts = () => {
+    removeOwnedPidFile(pidFile, instanceId);
+  };
+  writePidFile(pidFile, instanceId);
 
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
   let activeRequestSocket = null;
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
+  let shuttingDown = false;
+  let idleTimer = null;
+  const configuredIdleTimeout = Number.parseInt(
+    process.env.CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS ?? "",
+    10
+  );
+  const idleTimeoutMs =
+    Number.isFinite(configuredIdleTimeout) && configuredIdleTimeout > 0
+      ? configuredIdleTimeout
+      : DEFAULT_IDLE_TIMEOUT_MS;
+  const configuredShutdownTimeout = Number.parseInt(
+    process.env.CODEX_COMPANION_BROKER_SHUTDOWN_TIMEOUT_MS ?? "",
+    10
+  );
+  const shutdownTimeoutMs =
+    Number.isFinite(configuredShutdownTimeout) && configuredShutdownTimeout > 0
+      ? configuredShutdownTimeout
+      : DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const sockets = new Set();
 
   function clearSocketOwnership(socket) {
@@ -100,22 +168,59 @@ async function main() {
   }
 
   async function shutdown(server) {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
     for (const socket of sockets) {
       socket.end();
     }
-    await appClient.close().catch(() => {});
-    await new Promise((resolve) => server.close(resolve));
-    if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
-      fs.unlinkSync(listenTarget.path);
+    await settleWithin(
+      appClient.close({ timeoutMs: Math.max(100, shutdownTimeoutMs - 100) }),
+      shutdownTimeoutMs
+    );
+    await settleWithin(
+      new Promise((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close(resolve);
+      }),
+      shutdownTimeoutMs
+    );
+    for (const socket of sockets) {
+      socket.destroy();
     }
-    if (pidFile && fs.existsSync(pidFile)) {
-      fs.unlinkSync(pidFile);
+    removeOwnedPidFile(pidFile, instanceId);
+  }
+
+  function scheduleIdleShutdown(server) {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
     }
+    if (shuttingDown || sockets.size > 0) {
+      return;
+    }
+    idleTimer = setTimeout(async () => {
+      await shutdown(server);
+      process.exit(0);
+    }, idleTimeoutMs);
+    idleTimer.unref();
   }
 
   appClient.setNotificationHandler(routeNotification);
 
   const server = net.createServer((socket) => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
     sockets.add(socket);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -147,7 +252,8 @@ async function main() {
           send(socket, {
             id: message.id,
             result: {
-              userAgent: "codex-companion-broker"
+              userAgent: "codex-companion-broker",
+              brokerInstanceId: instanceId
             }
           });
           continue;
@@ -157,7 +263,30 @@ async function main() {
           continue;
         }
 
+        if (message.id !== undefined && message.method === "broker/status") {
+          send(socket, {
+            id: message.id,
+            result: {
+              instanceId,
+              protocolVersion: 1,
+              pid: process.pid,
+              cwd
+            }
+          });
+          continue;
+        }
+
         if (message.id !== undefined && message.method === "broker/shutdown") {
+          if (
+            !message.params?.instanceId ||
+            message.params.instanceId !== instanceId
+          ) {
+            send(socket, {
+              id: message.id,
+              error: buildJsonRpcError(-32002, "Broker instance mismatch.")
+            });
+            continue;
+          }
           send(socket, { id: message.id, result: {} });
           await shutdown(server);
           process.exit(0);
@@ -225,12 +354,46 @@ async function main() {
     socket.on("close", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      scheduleIdleShutdown(server);
     });
 
     socket.on("error", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      scheduleIdleShutdown(server);
     });
+  });
+
+  server.on("error", async (error) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    await settleWithin(
+      appClient.close({ timeoutMs: Math.max(100, shutdownTimeoutMs - 100) }),
+      shutdownTimeoutMs
+    );
+    cleanupFailureArtifacts();
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+
+  void appClient.exitPromise.then(async () => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    if (server.listening) {
+      await settleWithin(
+        new Promise((resolve) => server.close(resolve)),
+        shutdownTimeoutMs
+      );
+    }
+    cleanupFailureArtifacts();
+    process.exit(1);
   });
 
   process.on("SIGTERM", async () => {
@@ -243,10 +406,13 @@ async function main() {
     process.exit(0);
   });
 
-  server.listen(listenTarget.path);
+  server.listen(listenTarget.path, () => {
+    scheduleIdleShutdown(server);
+  });
 }
 
 main().catch((error) => {
+  cleanupFailureArtifacts();
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });

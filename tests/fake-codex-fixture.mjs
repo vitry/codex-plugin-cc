@@ -233,7 +233,10 @@ function structuredReviewPayload(prompt) {
 }
 
 function taskPayload(prompt, resume) {
-  if (prompt.includes("<task>") && prompt.includes("Only review the work from the previous Claude turn.")) {
+  if (
+    prompt.includes("<task>") &&
+    /Only review the work from the previous (?:Claude Code|ZCode) turn\./.test(prompt)
+  ) {
     if (BEHAVIOR === "adversarial-clean") {
       return "ALLOW: No blocking issues found in the previous turn.";
     }
@@ -287,6 +290,7 @@ rl.on("line", (line) => {
     switch (message.method) {
       case "initialize":
         state.capabilities = message.params.capabilities || null;
+        state.clientInfo = message.params.clientInfo || null;
         saveState(state);
         send({ id: message.id, result: { userAgent: "fake-codex-app-server" } });
         break;
@@ -312,6 +316,8 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
+        state.lastThreadStart = message.params;
+        saveState(state);
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
@@ -352,13 +358,28 @@ rl.on("line", (line) => {
       }
 
       case "externalAgentConfig/import": {
+        const importId = "import_1";
         if (BEHAVIOR === "external-import-unsupported") {
           send({ id: message.id, error: { code: -32601, message: "Unsupported method: externalAgentConfig/import" } });
           break;
         }
         if (BEHAVIOR === "external-import-fails") {
-          send({ id: message.id, result: {} });
-          send({ method: "externalAgentConfig/import/completed", params: {} });
+          send({ id: message.id, result: { importId } });
+          send({
+            method: "externalAgentConfig/import/completed",
+            params: {
+              importId,
+              itemTypeResults: [{
+                itemType: "SESSIONS",
+                successes: [],
+                failures: [{
+                  itemType: "SESSIONS",
+                  failureStage: "session_missing",
+                  message: "external agent session was not detected for import"
+                }]
+              }]
+            }
+          });
           break;
         }
         const sessions = (message.params.migrationItems || [])
@@ -399,8 +420,18 @@ rl.on("line", (line) => {
           saveState(state);
           saveImportLedger(ledger);
         }
-        send({ id: message.id, result: {} });
-        send({ method: "externalAgentConfig/import/completed", params: {} });
+        send({ id: message.id, result: { importId } });
+        send({
+          method: "externalAgentConfig/import/completed",
+          params: {
+            importId,
+            itemTypeResults: [{
+              itemType: "SESSIONS",
+              successes: [{ itemType: "SESSIONS", source: sourcePath, target: thread.id }],
+              failures: []
+            }]
+          }
+        });
         break;
       }
 
@@ -653,6 +684,8 @@ export function buildEnv(binDir) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
-    PATH: `${binDir}${sep}${process.env.PATH}`
+    PATH: `${binDir}${sep}${process.env.PATH}`,
+    CODEX_HOME: path.join(binDir, "codex-home"),
+    CODEX_COMPANION_APP_SERVER_MODE: "direct"
   };
 }

@@ -2,6 +2,7 @@ name: Pull Request CI
 
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,3 +34,26 @@ jobs:
 
       - name: Run build
         run: npm run build
+
+  windows-locks:
+    name: Windows lock lifecycle
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test Windows lock and state lifecycle
+        run: |
+          node --test tests/file-lock.test.mjs tests/state.test.mjs
+          node --test --test-name-pattern="Node SQLite reader" tests/zcode-session-transfer.test.mjs

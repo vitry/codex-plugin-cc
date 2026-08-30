@@ -3,14 +3,47 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { withFileLockSync } from "./file-lock.mjs";
+import { resolveHostPluginDataDir } from "./host.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
-const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+
+function resolvePersistentRuntimeRoot() {
+  const homeDir = os.homedir();
+  if (process.platform === "darwin") {
+    return path.join(
+      homeDir,
+      "Library",
+      "Application Support",
+      "OpenAI",
+      "CodexCompanion",
+      "runtime"
+    );
+  }
+  if (process.platform === "win32") {
+    return path.join(
+      homeDir,
+      "AppData",
+      "Local",
+      "OpenAI",
+      "CodexCompanion",
+      "runtime"
+    );
+  }
+  return path.join(
+    homeDir,
+    ".local",
+    "state",
+    "openai",
+    "codex-companion",
+    "runtime"
+  );
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -26,7 +59,7 @@ function defaultState() {
   };
 }
 
-export function resolveStateDir(cwd) {
+function resolveWorkspaceStateDir(cwd, stateRoot) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonicalWorkspaceRoot = workspaceRoot;
   try {
@@ -38,9 +71,22 @@ export function resolveStateDir(cwd) {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
   return path.join(stateRoot, `${slug}-${hash}`);
+}
+
+export function resolveStateDir(cwd, env = process.env) {
+  const pluginDataDir = resolveHostPluginDataDir(env);
+  const stateRoot = pluginDataDir
+    ? path.join(pluginDataDir, "state")
+    : FALLBACK_STATE_ROOT_DIR;
+  return resolveWorkspaceStateDir(cwd, stateRoot);
+}
+
+export function resolvePersistentRuntimeDir(cwd, stateRoot = null) {
+  return resolveWorkspaceStateDir(
+    cwd,
+    stateRoot || resolvePersistentRuntimeRoot()
+  );
 }
 
 export function resolveStateFile(cwd) {
@@ -89,7 +135,22 @@ function removeFileIfExists(filePath) {
   }
 }
 
-export function saveState(cwd, state) {
+function writeJsonAtomic(filePath, value) {
+  const tempPath = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    removeFileIfExists(tempPath);
+  }
+}
+
+function stateLockPath(cwd) {
+  ensureStateDir(cwd);
+  return path.join(resolveStateDir(cwd), ".state.lock");
+}
+
+function saveStateUnlocked(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
   const nextJobs = pruneJobs(state.jobs ?? []);
@@ -111,14 +172,20 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeJsonAtomic(resolveStateFile(cwd), nextState);
   return nextState;
 }
 
+export function saveState(cwd, state) {
+  return withFileLockSync(stateLockPath(cwd), () => saveStateUnlocked(cwd, state));
+}
+
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  return withFileLockSync(stateLockPath(cwd), () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveStateUnlocked(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {
@@ -166,7 +233,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeJsonAtomic(jobFile, payload);
   return jobFile;
 }
 

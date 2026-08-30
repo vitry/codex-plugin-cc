@@ -1,9 +1,9 @@
-# Codex plugin for Claude Code
+# Codex plugin for Claude Code and ZCode
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use Codex from inside Claude Code or ZCode for code reviews and delegated tasks.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
-they already have.
+The host handles the conversation and command UI. Codex remains the execution engine for reviews,
+rescue tasks, session transfer, and the optional stop-time review gate.
 
 <video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
@@ -18,6 +18,7 @@ they already have.
 - **ChatGPT subscription (incl. Free) or OpenAI API key.**
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
 - **Node.js 18.18 or later**
+- **For `/codex:transfer`: Node.js 22.5 or later, or the `sqlite3` command**
 
 ## Install
 
@@ -72,6 +73,116 @@ One simple first run is:
 /codex:result
 ```
 
+## ZCode Local Development Install
+
+These instructions were verified with ZCode Desktop 3.3.6 and its bundled CLI 0.15.2. They install
+the plugin from this worktree without changing the Claude Code installation described above.
+
+ZCode 0.15.2 supports listing, enabling, disabling, and uninstalling plugins from its CLI. Adding a
+local marketplace and installing from it are currently **ZCode Protocol-only** operations; they are
+not available as `zcode plugins` CLI subcommands. You can perform those two operations through
+ZCode Desktop's plugin management UI or a client connected to `zcode app-server`.
+
+If the ZCode CLI is not on your `PATH` on macOS, the Desktop app's bundled CLI can be used as:
+
+```bash
+alias zcode='node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
+```
+
+From the repository root, resolve the local marketplace file:
+
+```bash
+MARKETPLACE_FILE="$(pwd)/marketplace.json"
+```
+
+The local marketplace is the repository-root `marketplace.json`, not a file inside
+`.zcode-plugin`. Install it as follows:
+
+1. **Protocol-only:** call `plugins/marketplace/add` with `source` set to the absolute
+   `$MARKETPLACE_FILE` path. ZCode registers its marketplace ID as `openai-codex`.
+2. **Protocol-only:** call `plugins/install` for plugin `codex` from marketplace
+   `openai-codex`.
+3. Enable the installed plugin for new sessions:
+
+```bash
+zcode plugins enable codex@openai-codex
+```
+
+For repeated local installs, call Protocol method `plugins/marketplace/update` before reinstalling.
+ZCode caches plugin source by marketplace and version, so an unchanged version can otherwise reuse
+an older worktree snapshot. Uninstalling first is the most deterministic development refresh:
+
+```bash
+zcode plugins uninstall codex@openai-codex --force
+```
+
+Confirm that ZCode discovers the enabled plugin and commands:
+
+```bash
+zcode plugins list --json
+zcode commands list --json
+```
+
+The plugin list should contain `codex@openai-codex`. Command discovery should contain these eight
+commands:
+
+- `/codex:setup`
+- `/codex:review`
+- `/codex:adversarial-review`
+- `/codex:rescue`
+- `/codex:transfer`
+- `/codex:status`
+- `/codex:result`
+- `/codex:cancel`
+
+ZCode commands are namespaced as `/codex:*` to avoid collisions with built-in, workspace, and
+other plugin commands. The plugin does not install unprefixed aliases such as `/setup`.
+
+Start a new ZCode session after changing plugin enablement. Then run `/codex:setup` and a read-only
+review to verify the MCP bridge:
+
+```bash
+/codex:setup
+/codex:review
+```
+
+ZCode itself must have an explicit model provider before it can execute slash commands in headless
+or interactive sessions. This is separate from the Codex authentication checked by
+`/codex:setup`. If ZCode reports that model config is missing, configure the provider in ZCode
+before testing the command layer.
+
+`/codex:transfer` imports the current ZCode session into a persistent Codex thread:
+
+```bash
+/codex:transfer
+/codex:transfer --source sess_<id>
+/codex:transfer --source /path/to/db.sqlite#sess_<id>
+```
+
+The adapter reads visible user/assistant text through Node.js 22.5+'s built-in SQLite reader,
+falling back to the system `sqlite3` command on older Node.js versions. It opens the ZCode database
+read-only and does not modify it. ZCode lifecycle and review-gate hooks are active: `SessionStart`
+records lifecycle metadata, `PreToolUse` binds each companion MCP call to the calling ZCode
+session, and `Stop` runs the optional review gate.
+
+ZCode stores workspace-partitioned state under
+`$ZCODE_PLUGIN_DATA/state/<workspace-name>-<hash>/`: `state.json` contains the
+bounded job index, `jobs/` contains detailed job records and logs, and shared
+broker metadata is stored alongside them. The runtime falls back to the system
+temporary directory only when the host does not provide a plugin data
+directory. ZCode 0.15.2 does not expose `SessionEnd`; abandoned broker leases
+are therefore reclaimed by bounded idle shutdown and stale-owner checks rather
+than immediate end-of-session cleanup.
+
+Remove the development plugin with the supported CLI:
+
+```bash
+zcode plugins uninstall codex@openai-codex --force
+```
+
+After uninstalling the plugin, removing the local `openai-codex` marketplace itself is a
+**Protocol-only** `plugins/marketplace/remove` operation.
+
 ## Usage
 
 ### `/codex:review`
@@ -86,7 +197,11 @@ Use it when you want:
 - a review of your current uncommitted changes
 - a review of your branch compared to a base branch like `main`
 
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
+Use `--base <ref>` for branch review. It also supports `--wait`, `--background`, and `--cwd <path>`.
+In ZCode, a workspace containing exactly one nested Git repository selects it automatically; use
+`--cwd <path>` when the workspace contains multiple repositories. The command is not steerable and
+does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when
+you want to challenge a specific decision or risk area.
 
 Examples:
 
@@ -94,6 +209,7 @@ Examples:
 /codex:review
 /codex:review --base main
 /codex:review --background
+/codex:review --wait --cwd demo
 ```
 
 This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
@@ -104,8 +220,9 @@ Runs a **steerable** review that questions the chosen implementation and design.
 
 It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch
+review and `--cwd <path>` for repository selection. It also supports `--wait` and `--background`.
+Unlike `/codex:review`, it can take extra focus text after the flags.
 
 Use it when you want:
 
@@ -125,7 +242,8 @@ This command is read-only. It does not fix code.
 
 ### `/codex:rescue`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+Hands a task to Codex. Claude Code routes through its registered rescue subagent; ZCode calls the
+companion MCP directly because ZCode 0.15.2 treats plugin agents as diagnostic-only.
 
 Use it when you want Codex to:
 
@@ -164,18 +282,26 @@ Ask Codex to redesign the database connection to be more resilient.
 
 ### `/codex:transfer`
 
-Creates a persistent Codex thread from the current Claude Code session and prints a `codex resume <session-id>` command.
+Creates a persistent Codex thread from the current host session and prints a `codex resume <session-id>` command.
 
-Use it when you started a debugging or implementation conversation in Claude Code and want to continue that same context directly in Codex.
+In ZCode, the command reads the calling session from the ZCode SQLite database:
 
 Examples:
 
 ```bash
 /codex:transfer
-/codex:transfer --source ~/.claude/projects/-Users-me-repo/<session-id>.jsonl
+/codex:transfer --source sess_<id>
+/codex:transfer --source /path/to/db.sqlite#sess_<id>
 ```
 
-The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
+Only visible user and assistant text is exported; reasoning and tool records are excluded. The
+database is opened read-only, and the compatibility transcript is held in a private temporary
+directory that is removed after import.
+
+In Claude Code, `SessionStart` supplies the current transcript automatically, and
+`--source ~/.claude/projects/<project>/<session-id>.jsonl` remains available as a manual override.
+Both hosts use Codex's external-agent session importer to create visible turns that can be continued
+in the App or TUI. Older Codex versions that do not expose session import must be upgraded first.
 
 ### `/codex:status`
 
@@ -231,10 +357,12 @@ You can also use `/codex:setup` to manage the optional review gate.
 /codex:setup --disable-review-gate
 ```
 
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
+When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based
+on the host's previous response. If that review finds issues, the stop is blocked so the host can
+address them first.
 
 > [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+> The review gate can create a long-running host/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
 
 ## Typical Flows
 
@@ -270,7 +398,7 @@ The Codex plugin wraps the [Codex app server](https://developers.openai.com/code
 
 ### Common Configurations
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
+If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you opened in your host:
 
 ```toml
 model = "gpt-5.4-mini"
@@ -297,7 +425,11 @@ This way you can review the Codex work or continue the work there.
 
 If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
 
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
+If you only use a host client today and have not used Codex yet, you will also need to sign in to
+Codex with either a ChatGPT account or an API key.
+[Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing),
+and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both
+ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready.
 
 ### Does the plugin use a separate Codex runtime?
 

@@ -4,6 +4,16 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+if (
+  process.env.NODE_TEST_CONTEXT &&
+  !process.env.CODEX_COMPANION_TEST_BROKER_STATE_ROOT
+) {
+  process.env.CODEX_COMPANION_TEST_BROKER_STATE_ROOT = path.join(
+    os.tmpdir(),
+    `codex-plugin-broker-state-${process.pid}`
+  );
+}
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }

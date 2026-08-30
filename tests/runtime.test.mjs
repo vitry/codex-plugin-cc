@@ -8,13 +8,17 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { getConfig, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
+const PLUGIN_VERSION = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8")).version;
 const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
+const ZCODE_SESSION_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "session-lifecycle-hook.mjs");
+const ZCODE_MCP_SESSION_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "mcp-session-hook.mjs");
+const ZCODE_STOP_HOOK = path.join(ROOT, "plugins", "zcode", "scripts", "stop-review-gate-hook.mjs");
 
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const start = Date.now();
@@ -27,6 +31,39 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   }
   throw new Error("Timed out waiting for condition.");
 }
+
+function buildSharedBrokerEnv(binDir) {
+  return {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_APP_SERVER_MODE: "shared"
+  };
+}
+
+function registerBrokerCleanup(t, cwd, env) {
+  t.after(() => {
+    if (!loadBrokerSession(cwd)) {
+      return;
+    }
+    const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+      cwd,
+      env,
+      input: JSON.stringify({
+        hook_event_name: "SessionEnd",
+        cwd
+      })
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  });
+}
+
+function sqlText(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+test("fake Codex environments isolate the import ledger", () => {
+  const binDir = makeTempDir();
+  assert.equal(buildEnv(binDir).CODEX_HOME, path.join(binDir, "codex-home"));
+});
 
 test("setup reports ready when fake codex is installed and authenticated", () => {
   const binDir = makeTempDir();
@@ -42,6 +79,29 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
   assert.equal(payload.ready, true);
   assert.match(payload.codex.detail, /advanced runtime available/);
   assert.equal(payload.sessionRuntime.mode, "direct");
+});
+
+test("ZCode environment supplies app-server client metadata", () => {
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+
+  const result = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: ROOT,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: ROOT
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.deepEqual(fakeState.clientInfo, {
+    title: "Codex Plugin",
+    name: "ZCode",
+    version: PLUGIN_VERSION
+  });
 });
 
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
@@ -157,6 +217,90 @@ test("review renders a no-findings result from app-server review/start", () => {
   assert.match(result.stdout, /No material issues found/);
 });
 
+test("ZCode review selects the only nested Git repository", () => {
+  const workspace = makeTempDir();
+  const repo = path.join(workspace, "demo");
+  const binDir = makeTempDir();
+  fs.mkdirSync(repo);
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+  run("git", ["add", "app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: workspace,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace,
+      ZCODE_PLUGIN_DATA: path.join(workspace, ".plugin-data")
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Reviewed uncommitted changes/);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(fs.realpathSync(fakeState.threads[0].cwd), fs.realpathSync(repo));
+});
+
+test("ZCode review reports nested repository candidates when selection is ambiguous", () => {
+  const workspace = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  for (const name of ["api", "web"]) {
+    const repo = path.join(workspace, name);
+    fs.mkdirSync(repo);
+    initGitRepo(repo);
+  }
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: workspace,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace
+    }
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Multiple Git repositories/);
+  assert.match(result.stderr, /\bapi\b/);
+  assert.match(result.stderr, /\bweb\b/);
+  assert.match(result.stderr, /--cwd <path>/);
+});
+
+test("ZCode review keeps explicit --cwd authoritative in a multi-repository workspace", () => {
+  const workspace = makeTempDir();
+  const processCwd = makeTempDir();
+  const selectedRepo = path.join(workspace, "api");
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  for (const name of ["api", "web"]) {
+    const repo = path.join(workspace, name);
+    fs.mkdirSync(repo);
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+    run("git", ["add", "app.js"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
+  }
+  fs.writeFileSync(path.join(selectedRepo, "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review", "--cwd", "api"], {
+    cwd: processCwd,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: workspace
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(fs.realpathSync(fakeState.threads[0].cwd), fs.realpathSync(selectedRepo));
+});
+
 test("task runs when the active provider does not require OpenAI login", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -244,6 +388,84 @@ test("transfer delegates the current Claude session directly to native import", 
   );
 });
 
+test("transfer exports the calling ZCode session and imports it into Codex", () => {
+  const root = makeTempDir();
+  const repo = path.join(root, "repo");
+  const binDir = makeTempDir();
+  const pluginData = path.join(root, "plugin-data");
+  const databasePath = path.join(root, "db.sqlite");
+  const otherRepo = path.join(root, "other-repo");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(otherRepo);
+  fs.mkdirSync(pluginData);
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const statements = [
+    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);",
+    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+    "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+    `INSERT INTO session VALUES ('sess_zcode_transfer', ${sqlText(repo)}, 'ZCode transfer', 1000, 2000);`,
+    `INSERT INTO session VALUES ('sess_zcode_other', ${sqlText(otherRepo)}, 'Other ZCode transfer', 1000, 2000);`,
+    `INSERT INTO message VALUES ('msg_user', 'sess_zcode_transfer', 1100, 1100, ${sqlText(JSON.stringify({ role: "user" }))});`,
+    `INSERT INTO part VALUES ('part_user', 'msg_user', 'sess_zcode_transfer', 1110, 1110, ${sqlText(JSON.stringify({ type: "text", text: "Continue from ZCode" }))});`,
+    `INSERT INTO message VALUES ('msg_assistant', 'sess_zcode_transfer', 1200, 1200, ${sqlText(JSON.stringify({ role: "assistant" }))});`,
+    `INSERT INTO part VALUES ('part_assistant', 'msg_assistant', 'sess_zcode_transfer', 1210, 1210, ${sqlText(JSON.stringify({ type: "text", text: "ZCode answer" }))});`,
+    `INSERT INTO message VALUES ('msg_other', 'sess_zcode_other', 1300, 1300, ${sqlText(JSON.stringify({ role: "user" }))});`,
+    `INSERT INTO part VALUES ('part_other', 'msg_other', 'sess_zcode_other', 1310, 1310, ${sqlText(JSON.stringify({ type: "text", text: "Other workspace request" }))});`
+  ];
+  const created = run("sqlite3", [databasePath], {
+    cwd: repo,
+    input: statements.join("\n")
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const result = run("node", [SCRIPT, "transfer", "--json"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      CODEX_COMPANION_SESSION_ID: "sess_zcode_transfer",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_PLUGIN_DATA: pluginData,
+      ZCODE_SESSION_DB_PATH: databasePath
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.threadId, "thr_1");
+  assert.equal(payload.sessionId, "sess_zcode_transfer");
+  assert.equal(payload.sourcePath, null);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.notEqual(fakeState.lastExternalAgentImport.sourcePath.startsWith(path.join(process.env.HOME, ".claude")), true);
+  assert.deepEqual(
+    fakeState.threads[0].visibleMessages.map((message) => message.text),
+    ["Continue from ZCode", "ZCode answer"]
+  );
+
+  const explicit = run(
+    "node",
+    [SCRIPT, "transfer", "--source", `${databasePath}#sess_zcode_other`, "--json"],
+    {
+      cwd: repo,
+      env: {
+        ...buildEnv(binDir),
+        CODEX_COMPANION_HOST: "zcode",
+        ZCODE_PROJECT_DIR: repo
+      }
+    }
+  );
+  assert.equal(explicit.status, 0, explicit.stderr);
+  const explicitState = JSON.parse(
+    fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8")
+  );
+  const explicitPayload = JSON.parse(explicit.stdout);
+  assert.equal(
+    explicitState.threads.find((thread) => thread.id === explicitPayload.threadId).cwd,
+    otherRepo
+  );
+});
+
 test("transfer reports an actionable upgrade error when native import is unsupported", () => {
   const home = makeTempDir();
   const repo = path.join(home, "repo");
@@ -274,7 +496,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
   assert.match(result.stderr, /@openai\/codex@latest/);
 });
 
-test("transfer fails visibly when native import completes without a ledger record", () => {
+test("transfer reports failures from the native import completion", () => {
   const home = makeTempDir();
   const repo = path.join(home, "repo");
   const binDir = makeTempDir();
@@ -300,7 +522,7 @@ test("transfer fails visibly when native import completes without a ledger recor
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /did not record an imported thread/);
+  assert.match(result.stderr, /external agent session was not detected for import/);
 });
 
 test("transfer rejects sources outside the Claude projects directory", () => {
@@ -698,6 +920,63 @@ test("session start hook exports the Claude session id, transcript path, and plu
   );
 });
 
+test("ZCode SessionStart persists lifecycle session metadata", () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+
+  const result = run("node", [ZCODE_SESSION_HOOK, "SessionStart"], {
+    cwd: repo,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_SESSION_ID: "sess-zcode"
+    },
+    input: JSON.stringify({
+      workspacePath: repo,
+      sessionId: "sess-zcode"
+    })
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(getConfig(repo).zcodeSessions["sess-zcode"].startedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+for (const toolName of [
+  "mcp__plugin_codex_codex__companion",
+  "mcp__codex__companion"
+]) {
+  test(`ZCode PreToolUse injects the calling session into ${toolName}`, () => {
+    const result = run("node", [ZCODE_MCP_SESSION_HOOK], {
+      cwd: ROOT,
+      env: process.env,
+      input: JSON.stringify({
+        hookEventName: "PreToolUse",
+        sessionId: "sess-zcode-call",
+        toolName,
+        toolInput: {
+          command: "status",
+          arguments: "--json",
+          sessionId: "sess-spoofed"
+        }
+      })
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: {
+          command: "status",
+          arguments: "--json",
+          sessionId: "sess-zcode-call"
+        }
+      }
+    });
+  });
+}
+
 test("write task output focuses on the Codex result without generic follow-up hints", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -782,6 +1061,39 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
   assert.equal(fakeState.lastTurnStart.effort, "low");
+});
+
+test("ZCode broker starts a thread with ZCode client metadata", (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = {
+    ...buildSharedBrokerEnv(binDir),
+    CODEX_COMPANION_HOST: "zcode",
+    ZCODE_PROJECT_DIR: repo
+  };
+  registerBrokerCleanup(t, repo, env);
+
+  const result = run("node", [SCRIPT, "task", "check host metadata"], {
+    cwd: repo,
+    env
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(loadBrokerSession(repo), "ZCode broker coverage requires an active broker");
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.deepEqual(fakeState.clientInfo, {
+    title: "Codex Plugin",
+    name: "ZCode",
+    version: PLUGIN_VERSION
+  });
+  assert.equal(fakeState.lastThreadStart.serviceName, "zcode_codex_plugin");
 });
 
 test("task logs reasoning summaries and assistant messages to the job log", () => {
@@ -890,7 +1202,7 @@ test("task can finish after subagent work even if the parent turn/completed even
   assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
 });
 
-test("task using the shared broker still completes when Codex spawns subagents", () => {
+test("task using the shared broker still completes when Codex spawns subagents", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "with-subagent");
@@ -900,16 +1212,15 @@ test("task using the shared broker still completes when Codex spawns subagents",
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
     env
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
+  assert.ok(loadBrokerSession(repo), "shared-broker coverage requires an active broker");
 
   const result = run("node", [SCRIPT, "task", "challenge the current design"], {
     cwd: repo,
@@ -1031,7 +1342,7 @@ test("adversarial review rejects staged-only scope to match review target select
   assert.match(result.stderr, /Use one of: auto, working-tree, branch, or pass --base <ref>/i);
 });
 
-test("review accepts --background while still running as a tracked review job", () => {
+test("Claude review --background leaves detachment to the host and returns the final review", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -1050,16 +1361,60 @@ test("review accepts --background while still running as a tracked review job", 
   const launchPayload = JSON.parse(launched.stdout);
   assert.equal(launchPayload.review, "Review");
   assert.match(launchPayload.codex.stdout, /No material issues found/);
+});
 
-  const status = run("node", [SCRIPT, "status"], {
+test("ZCode review --background enqueues a detached worker and exposes per-job status", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const launched = run("node", [SCRIPT, "review", "--background", "--json"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo
+    }
   });
 
+  assert.equal(launched.status, 0, launched.stderr);
+  const launchPayload = JSON.parse(launched.stdout);
+  assert.equal(launchPayload.status, "queued");
+  assert.match(launchPayload.jobId, /^review-/);
+
+  const status = run(
+    "node",
+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
+    {
+      cwd: repo,
+      env: {
+        ...buildEnv(binDir),
+        CODEX_COMPANION_HOST: "zcode",
+        ZCODE_PROJECT_DIR: repo
+      }
+    }
+  );
+
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /# Codex Status/);
-  assert.match(status.stdout, /Codex Review/);
-  assert.match(status.stdout, /completed/);
+  const statusPayload = JSON.parse(status.stdout);
+  assert.equal(statusPayload.job.id, launchPayload.jobId);
+  assert.equal(statusPayload.job.status, "completed");
+
+  const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo
+    }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(JSON.parse(result.stdout).storedJob.rendered, /No material issues found/);
 });
 
 test("status shows phases, hints, and the latest finished job", () => {
@@ -1737,7 +2092,7 @@ test("cancel with a job id can still target an active job from another Claude se
   assert.equal(state.jobs[0].status, "cancelled");
 });
 
-test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async () => {
+test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -1747,7 +2102,8 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
   const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
     cwd: repo,
     env
@@ -1757,6 +2113,8 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   const launchPayload = JSON.parse(launched.stdout);
   const jobId = launchPayload.jobId;
   assert.ok(jobId);
+  await waitFor(() => loadBrokerSession(repo), { timeoutMs: 15000 });
+  assert.ok(loadBrokerSession(repo), "broker interruption coverage requires an active broker");
 
   const stateDir = resolveStateDir(repo);
   const runningJob = await waitFor(() => {
@@ -1965,7 +2323,7 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
   assert.match(fakeState.lastTurnStart.prompt, /<task>/i);
   assert.match(fakeState.lastTurnStart.prompt, /<compact_output_contract>/i);
-  assert.match(fakeState.lastTurnStart.prompt, /Only review the work from the previous Claude turn/i);
+  assert.match(fakeState.lastTurnStart.prompt, /Only review the work from the previous Claude Code turn/i);
   assert.match(fakeState.lastTurnStart.prompt, /I completed the refactor and updated the retry logic\./);
 
   const status = run("node", [SCRIPT, "status"], {
@@ -1977,6 +2335,46 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
   });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /Codex Stop Gate Review/);
+});
+
+test("ZCode Stop normalizes its payload and preserves the strict block response", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const setup = run("node", [SCRIPT, "setup", "--enable-review-gate", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(setup.status, 0, setup.stderr);
+
+  const blocked = run("node", [ZCODE_STOP_HOOK], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "zcode",
+      ZCODE_PROJECT_DIR: repo,
+      ZCODE_SESSION_ID: "sess-zcode-stop"
+    },
+    input: JSON.stringify({
+      workspacePath: repo,
+      sessionId: "sess-zcode-stop",
+      response: "I completed the ZCode implementation."
+    })
+  });
+
+  assert.equal(blocked.status, 0, blocked.stderr);
+  assert.deepEqual(Object.keys(JSON.parse(blocked.stdout)).sort(), ["decision", "reason"]);
+  assert.equal(JSON.parse(blocked.stdout).decision, "block");
+  assert.match(JSON.parse(blocked.stdout).reason, /Missing empty-state guard/i);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /previous ZCode turn/i);
+  assert.doesNotMatch(fakeState.lastTurnStart.prompt, /previous Claude/i);
 });
 
 test("stop hook logs running tasks to stderr without blocking when the review gate is disabled", () => {
@@ -2034,6 +2432,40 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
   assert.match(blocked.stderr, /Codex task task-live is still running/i);
   assert.match(blocked.stderr, /\/codex:status/i);
   assert.match(blocked.stderr, /\/codex:cancel task-live/i);
+});
+
+test("stop hook falls back to the ZCode project directory", () => {
+  const repo = makeTempDir();
+  const hookCwd = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "adversarial-clean");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  const env = {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_HOST: "zcode",
+    ZCODE_PROJECT_DIR: repo
+  };
+
+  const setup = run("node", [SCRIPT, "setup", "--enable-review-gate", "--json"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(setup.status, 0, setup.stderr);
+
+  const allowed = run("node", [STOP_HOOK], {
+    cwd: hookCwd,
+    env,
+    input: JSON.stringify({})
+  });
+
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.equal(allowed.stdout.trim(), "");
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.cwd, fs.realpathSync(repo));
 });
 
 test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {
@@ -2116,7 +2548,7 @@ test("stop hook runs the actual task when auth status looks stale", () => {
   assert.match(payload.reason, /Missing empty-state guard/i);
 });
 
-test("commands lazily start and reuse one shared app-server after first use", async () => {
+test("commands lazily start and reuse one shared app-server after first use", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2128,7 +2560,8 @@ test("commands lazily start and reuse one shared app-server after first use", as
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
 
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
@@ -2137,9 +2570,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(review.status, 0, review.stderr);
 
   const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
+  assert.ok(brokerSession, "shared-broker coverage requires an active broker");
 
   const adversarial = run("node", [SCRIPT, "adversarial-review"], {
     cwd: repo,
@@ -2161,7 +2592,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("setup reuses an existing shared app-server without starting another one", () => {
+test("setup reuses an existing shared app-server without starting another one", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2173,7 +2604,8 @@ test("setup reuses an existing shared app-server without starting another one", 
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const env = buildEnv(binDir);
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
 
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
@@ -2182,9 +2614,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(review.status, 0, review.stderr);
 
   const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
+  assert.ok(brokerSession, "shared-broker coverage requires an active broker");
 
   const setup = run("node", [SCRIPT, "setup", "--json"], {
     cwd: repo,
@@ -2206,7 +2636,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("status reports shared session runtime when a lazy broker is active", () => {
+test("status reports shared session runtime when a lazy broker is active", (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -2216,23 +2646,86 @@ test("status reports shared session runtime when a lazy broker is active", () =>
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
+
   const review = run("node", [SCRIPT, "review"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
+  assert.ok(loadBrokerSession(repo), "shared-broker coverage requires an active broker");
 
   const result = run("node", [SCRIPT, "status"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env
   });
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Session runtime: shared session/);
+});
+
+test("ending one session keeps a broker leased by another session", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+  const baseEnv = buildSharedBrokerEnv(binDir);
+  const firstEnv = {
+    ...baseEnv,
+    CODEX_COMPANION_SESSION_ID: "session-one"
+  };
+  const secondEnv = {
+    ...baseEnv,
+    CODEX_COMPANION_SESSION_ID: "session-two"
+  };
+
+  const review = run("node", [SCRIPT, "review"], { cwd: repo, env: firstEnv });
+  assert.equal(review.status, 0, review.stderr);
+  const secondReview = run("node", [SCRIPT, "review"], { cwd: repo, env: secondEnv });
+  assert.equal(secondReview.status, 0, secondReview.stderr);
+  const shared = loadBrokerSession(repo);
+  assert.deepEqual(
+    shared.leases.map((lease) => lease.sessionId),
+    ["session-one", "session-two"]
+  );
+
+  const firstEnd = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: firstEnv,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: "session-one",
+      cwd: repo
+    })
+  });
+  assert.equal(firstEnd.status, 0, firstEnd.stderr);
+  assert.equal(loadBrokerSession(repo).instanceId, shared.instanceId);
+
+  const reused = run("node", [SCRIPT, "review"], { cwd: repo, env: secondEnv });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(
+    JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).appServerStarts,
+    1
+  );
+
+  const finalEnd = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: secondEnv,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: "session-two",
+      cwd: repo
+    })
+  });
+  assert.equal(finalEnd.status, 0, finalEnd.stderr);
+  assert.equal(loadBrokerSession(repo), null);
 });
 
 test("setup and status honor --cwd when reading shared session runtime", () => {
@@ -2240,7 +2733,8 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
   const invocationWorkspace = makeTempDir();
 
   saveBrokerSession(targetWorkspace, {
-    endpoint: "unix:/tmp/fake-broker.sock"
+    endpoint: "unix:/tmp/fake-broker.sock",
+    instanceId: "fake-broker-instance"
   });
 
   const status = run("node", [SCRIPT, "status", "--cwd", targetWorkspace], {

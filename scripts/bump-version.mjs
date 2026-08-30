@@ -63,9 +63,33 @@ const TARGETS = [
       },
       {
         label: "plugins[codex].version",
-        get: (json) => findMarketplacePlugin(json).version,
+        get: (json) => findMarketplacePlugin(json, ".claude-plugin/marketplace.json").version,
         set: (json, version) => {
-          findMarketplacePlugin(json).version = version;
+          findMarketplacePlugin(json, ".claude-plugin/marketplace.json").version = version;
+        }
+      }
+    ]
+  },
+  {
+    file: ".zcode-plugin/plugin.json",
+    values: [
+      {
+        label: "version",
+        get: (json) => json.version,
+        set: (json, version) => {
+          json.version = version;
+        }
+      }
+    ]
+  },
+  {
+    file: "marketplace.json",
+    values: [
+      {
+        label: "plugins[codex].version",
+        get: (json) => findMarketplacePlugin(json, "marketplace.json").version,
+        set: (json, version) => {
+          findMarketplacePlugin(json, "marketplace.json").version = version;
         }
       }
     ]
@@ -131,9 +155,9 @@ function requireObject(value, label) {
   }
 }
 
-function findMarketplacePlugin(json) {
+function findMarketplacePlugin(json, file) {
   const plugin = json.plugins?.find((entry) => entry?.name === "codex");
-  requireObject(plugin, ".claude-plugin/marketplace.json plugins[codex]");
+  requireObject(plugin, `${file} plugins[codex]`);
   return plugin;
 }
 

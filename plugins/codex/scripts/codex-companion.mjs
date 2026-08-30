@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { launchDetachedWorker } from "./lib/background-worker.mjs";
 import {
     buildPersistentTaskThreadName,
     DEFAULT_CONTINUE_PROMPT,
@@ -23,7 +23,14 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import {
+  collectReviewContext,
+  ensureGitRepository,
+  resolveReviewCwd,
+  resolveReviewTarget
+} from "./lib/git.mjs";
+import { resolveHost } from "./lib/host.mjs";
+import { withJobLock } from "./lib/job-lock.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -48,11 +55,16 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  failQueuedJob,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import {
+  exportZCodeSession,
+  parseZCodeSessionSource
+} from "./lib/zcode-session-transfer.mjs";
 import {
   renderNativeReviewResult,
   renderReviewResult,
@@ -70,17 +82,17 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous ";
 
 function printUsage() {
   console.log(
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--cwd <path>]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--cwd <path>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-      "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
+      "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl|zcode-session|sqlite[#session]>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -291,12 +303,12 @@ function isActiveJobStatus(status) {
   return status === "queued" || status === "running";
 }
 
-function getCurrentClaudeSessionId() {
+function getCurrentHostSessionId(cwd = process.cwd()) {
   return process.env[SESSION_ID_ENV] ?? null;
 }
 
-function filterJobsForCurrentClaudeSession(jobs) {
-  const sessionId = getCurrentClaudeSessionId();
+function filterJobsForCurrentHostSession(jobs, cwd = process.cwd()) {
+  const sessionId = getCurrentHostSessionId(cwd);
   if (!sessionId) {
     return jobs;
   }
@@ -335,9 +347,9 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId = getCurrentClaudeSessionId();
+  const sessionId = getCurrentHostSessionId(workspaceRoot);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
-  const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
+  const visibleJobs = filterJobsForCurrentHostSession(jobs, workspaceRoot);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
@@ -541,7 +553,7 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
       title: "Codex Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      summary: "Stop-gate review of previous host turn"
     };
   }
 
@@ -615,7 +627,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 
 function renderTransferResult(payload) {
   const lines = [
-    "Transferred the Claude session into a Codex thread with visible turn history.",
+    `Transferred the ${payload.sourceHost} session into a Codex thread with visible turn history.`,
     `Codex session ID: ${payload.threadId}`,
     `Resume in Codex: ${payload.resumeCommand}`
   ];
@@ -623,15 +635,50 @@ function renderTransferResult(payload) {
 }
 
 async function executeTransfer(cwd, options = {}) {
-  const sourcePath = resolveClaudeSessionPath(cwd, {
-    source: options.source
-  });
-  const result = await importExternalAgentSession(cwd, { sourcePath });
+  const host = resolveHost(process.env, cwd);
+  let sourcePath;
+  let sourceSessionId;
+  let sourceHost;
+  let cleanupRoot = null;
+  let importHome = null;
+  let sourceCwd = cwd;
+
+  if (host.kind === "zcode") {
+    const selected = parseZCodeSessionSource(options.source);
+    const exported = exportZCodeSession(cwd, selected);
+    sourcePath = exported.sourcePath;
+    sourceSessionId = exported.sessionId;
+    sourceHost = "ZCode";
+    cleanupRoot = exported.cleanupRoot;
+    importHome = exported.importHome;
+    sourceCwd = exported.cwd;
+  } else {
+    sourcePath = resolveClaudeSessionPath(cwd, {
+      source: options.source
+    });
+    sourceSessionId = path.basename(sourcePath, ".jsonl");
+    sourceHost = "Claude Code";
+  }
+
+  let result;
+  try {
+    result = await importExternalAgentSession(cwd, {
+      sourcePath,
+      sourceLabel: sourceHost === "ZCode" ? "ZCode" : "Claude",
+      importHome,
+      sourceCwd
+    });
+  } finally {
+    if (cleanupRoot) {
+      fs.rmSync(cleanupRoot, { recursive: true, force: true });
+    }
+  }
   const payload = {
     threadId: result.threadId,
     resumeCommand: `codex resume ${result.threadId}`,
-    sourcePath,
-    sessionId: path.basename(sourcePath, ".jsonl")
+    sourcePath: sourceHost === "ZCode" ? null : sourcePath,
+    sessionId: sourceSessionId,
+    sourceHost
   };
 
   return {
@@ -668,34 +715,37 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
-  return child;
-}
-
-function enqueueBackgroundTask(cwd, job, request) {
+async function enqueueBackgroundJob(cwd, job, request, workerCommand) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  try {
+    await launchDetachedWorker({
+      cwd,
+      scriptPath: path.join(ROOT_DIR, "scripts", "codex-companion.mjs"),
+      workerCommand,
+      jobId: job.id
+    });
+  } catch (cause) {
+    const errorMessage = `Failed to launch background worker: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`;
+    if (await failQueuedJob(job, errorMessage)) {
+      appendLogLine(logFile, errorMessage);
+    }
+    throw new Error(errorMessage, { cause });
+  }
 
   return {
     payload: {
@@ -718,8 +768,13 @@ async function handleReviewCommand(argv, config) {
     }
   });
 
-  const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
+  const host = resolveHost(process.env, process.cwd());
+  const baseCwd = host.kind === "zcode" ? path.resolve(host.projectDir) : process.cwd();
+  const requestedCwd = options.cwd ? path.resolve(baseCwd, options.cwd) : baseCwd;
+  const cwd = resolveReviewCwd(requestedCwd, {
+    discoverNested: host.kind === "zcode" && !options.cwd
+  });
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
@@ -736,6 +791,21 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
+  if (options.background && host.kind === "zcode") {
+    ensureCodexAvailable(cwd);
+    const request = {
+      cwd,
+      base: options.base,
+      scope: options.scope,
+      model: options.model,
+      focusText,
+      reviewName: config.reviewName
+    };
+    const { payload } = await enqueueBackgroundJob(cwd, job, request, "review-worker");
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
   await runForegroundCommand(
     job,
     (progress) =>
@@ -799,7 +869,7 @@ async function handleTask(argv) {
       resumeLast,
       jobId: job.id
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = await enqueueBackgroundJob(cwd, job, request, "task-worker");
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -850,7 +920,6 @@ async function handleTaskWorker(argv) {
   if (!storedJob) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
-
   const request = storedJob.request;
   if (!request || typeof request !== "object") {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
@@ -865,7 +934,7 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
-  await runTrackedJob(
+  const execution = await runTrackedJob(
     {
       ...storedJob,
       workspaceRoot,
@@ -876,8 +945,74 @@ async function handleTaskWorker(argv) {
         ...request,
         onProgress: progress
       }),
-    { logFile }
+    {
+      logFile,
+      expectedStatus: "queued",
+      onStarted: notifyWorkerReady
+    }
   );
+  if (execution == null) {
+    notifyWorkerReady();
+  }
+}
+
+function notifyWorkerReady() {
+  if (typeof process.send !== "function") {
+    return;
+  }
+  process.send({ type: "ready" });
+  process.disconnect?.();
+}
+
+async function handleReviewWorker(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "job-id"]
+  });
+
+  if (!options["job-id"]) {
+    throw new Error("Missing required --job-id for review-worker.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
+  if (!storedJob) {
+    throw new Error(`No stored job found for ${options["job-id"]}.`);
+  }
+  const request = storedJob.request;
+  if (!request || typeof request !== "object") {
+    throw new Error(`Stored job ${options["job-id"]} is missing its review request payload.`);
+  }
+
+  const { logFile, progress } = createTrackedProgress(
+    {
+      ...storedJob,
+      workspaceRoot
+    },
+    {
+      logFile: storedJob.logFile ?? null
+    }
+  );
+  const execution = await runTrackedJob(
+    {
+      ...storedJob,
+      workspaceRoot,
+      logFile
+    },
+    () =>
+      executeReviewRun({
+        ...request,
+        onProgress: progress
+      }),
+    {
+      logFile,
+      expectedStatus: "queued",
+      onStarted: notifyWorkerReady
+    }
+  );
+  if (execution == null) {
+    notifyWorkerReady();
+  }
 }
 
 async function handleStatus(argv) {
@@ -933,8 +1068,11 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const sessionId = getCurrentClaudeSessionId();
-  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
+  const sessionId = getCurrentHostSessionId(workspaceRoot);
+  const jobs = filterJobsForCurrentHostSession(
+    sortJobsNewestFirst(listJobs(workspaceRoot)),
+    workspaceRoot
+  );
   const candidate = findLatestResumableTaskJob(jobs);
 
   const payload = {
@@ -968,8 +1106,37 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+  const target = resolveCancelableJob(cwd, reference, { env: process.env });
+  const cancellation = await withJobLock(target.workspaceRoot, target.job.id, () => {
+    const { workspaceRoot, job } = resolveCancelableJob(cwd, target.job.id, {
+      env: process.env
+    });
+    const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+    const completedAt = nowIso();
+    const nextJob = {
+      ...job,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      completedAt,
+      errorMessage: "Cancelled by user."
+    };
+    writeJobFile(workspaceRoot, job.id, {
+      ...existing,
+      ...nextJob,
+      cancelledAt: completedAt
+    });
+    upsertJob(workspaceRoot, {
+      id: job.id,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      errorMessage: "Cancelled by user.",
+      completedAt
+    });
+    return { workspaceRoot, job, existing, nextJob };
+  });
+  const { job, existing, nextJob } = cancellation;
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
 
@@ -985,30 +1152,6 @@ async function handleCancel(argv) {
 
   terminateProcessTree(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");
-
-  const completedAt = nowIso();
-  const nextJob = {
-    ...job,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-    errorMessage: "Cancelled by user."
-  };
-
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
-    ...nextJob,
-    cancelledAt: completedAt
-  });
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
 
   const payload = {
     jobId: job.id,
@@ -1048,6 +1191,9 @@ async function main() {
       break;
     case "task-worker":
       await handleTaskWorker(argv);
+      break;
+    case "review-worker":
+      await handleReviewWorker(argv);
       break;
     case "status":
       await handleStatus(argv);

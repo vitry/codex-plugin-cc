@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,38 @@ function fakeBrokerOptions(overrides = {}) {
     waitForBrokerEndpoint: async () => true,
     ...overrides
   };
+}
+
+function fakeIdToken(userId) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const claims = {
+    "https://api.openai.com/auth": { chatgpt_user_id: userId }
+  };
+  return `${encode({ alg: "none" })}.${encode(claims)}.`;
+}
+
+function writeCodexAuthFile(
+  codexHome,
+  accountId = "acct-current",
+  userId = "user-current",
+  mtimeMs = Date.now()
+) {
+  fs.mkdirSync(codexHome, { recursive: true });
+  const authFile = path.join(codexHome, "auth.json");
+  fs.writeFileSync(
+    authFile,
+    `${JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { account_id: accountId, id_token: fakeIdToken(userId) }
+    })}\n`,
+    "utf8"
+  );
+  fs.utimesSync(authFile, new Date(mtimeMs), new Date(mtimeMs));
+  return authFile;
+}
+
+function absentCodexHome() {
+  return path.join(makeTempDir(), "absent-codex-home");
 }
 
 function runProcess(args, options = {}) {
@@ -106,6 +139,7 @@ test("concurrent ensure calls create exactly one broker session", async () => {
   const cwd = makeTempDir();
   let spawnCount = 0;
   const options = fakeBrokerOptions({
+    env: { CODEX_HOME: absentCodexHome() },
     spawnBrokerProcess(args) {
       spawnCount += 1;
       return { pid: 7100, args };
@@ -312,14 +346,15 @@ test("teardown preserves artifacts owned by another broker instance", () => {
 
 test("keeps a shared broker until its final session lease ends", async () => {
   const cwd = makeTempDir();
+  const codexHome = absentCodexHome();
   const options = fakeBrokerOptions();
   const first = await ensureBrokerSession(cwd, {
     ...options,
-    env: { CODEX_COMPANION_SESSION_ID: "session-one" }
+    env: { CODEX_COMPANION_SESSION_ID: "session-one", CODEX_HOME: codexHome }
   });
   const second = await ensureBrokerSession(cwd, {
     ...options,
-    env: { CODEX_COMPANION_SESSION_ID: "session-two" }
+    env: { CODEX_COMPANION_SESSION_ID: "session-two", CODEX_HOME: codexHome }
   });
   assert.equal(first.instanceId, second.instanceId);
   assert.equal(typeof brokerLifecycle.releaseBrokerLease, "function");
@@ -341,6 +376,7 @@ test("keeps a shared broker until its final session lease ends", async () => {
 
 test("a new lease does not reuse an instance whose final lease is stopping", async () => {
   const cwd = makeTempDir();
+  const codexHome = absentCodexHome();
   let nextPid = 7400;
   const options = fakeBrokerOptions({
     spawnBrokerProcess() {
@@ -350,7 +386,7 @@ test("a new lease does not reuse an instance whose final lease is stopping", asy
   });
   const first = await ensureBrokerSession(cwd, {
     ...options,
-    env: { CODEX_COMPANION_SESSION_ID: "session-one" }
+    env: { CODEX_COMPANION_SESSION_ID: "session-one", CODEX_HOME: codexHome }
   });
   const released = await brokerLifecycle.releaseBrokerLease(cwd, "session-one");
   assert.equal(released.shouldShutdown, true);
@@ -358,7 +394,7 @@ test("a new lease does not reuse an instance whose final lease is stopping", asy
 
   const replacement = await ensureBrokerSession(cwd, {
     ...options,
-    env: { CODEX_COMPANION_SESSION_ID: "session-two" }
+    env: { CODEX_COMPANION_SESSION_ID: "session-two", CODEX_HOME: codexHome }
   });
   assert.notEqual(replacement.instanceId, first.instanceId);
   assert.equal(typeof brokerLifecycle.finalizeBrokerSession, "function");
@@ -539,6 +575,7 @@ test("recovers a ready broker left in starting state without spawning another", 
     cwd,
     fakeBrokerOptions({
       timeoutMs: 600,
+      env: { CODEX_HOME: absentCodexHome() },
       waitForBrokerEndpoint: async (_endpoint, timeoutMs, instanceId) => {
         probeTimeoutMs = timeoutMs;
         probedInstanceId = instanceId;
@@ -560,6 +597,438 @@ test("recovers a ready broker left in starting state without spawning another", 
   teardownBrokerSession(recovered);
 });
 
+test("recycles a live broker logged into a different codex account", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const existing = {
+    status: "ready",
+    instanceId: "auth-stale-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7500,
+    codexAuthIdentity: "acct-previous:user-previous",
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let spawnCount = 0;
+  let exitWaitCount = 0;
+  const shutdownCalls = [];
+
+  const replacement = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async (endpoint, timeoutMs, instanceId) => {
+        shutdownCalls.push({ endpoint, timeoutMs, instanceId });
+        return true;
+      },
+      waitForBrokerExit: async () => {
+        exitWaitCount += 1;
+        return true;
+      },
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7501 };
+      }
+    })
+  );
+
+  assert.deepEqual(shutdownCalls, [
+    {
+      endpoint: existing.endpoint,
+      timeoutMs: 1000,
+      instanceId: existing.instanceId
+    }
+  ]);
+  assert.equal(exitWaitCount, 1);
+  assert.equal(spawnCount, 1);
+  assert.notEqual(replacement.instanceId, existing.instanceId);
+  assert.equal(replacement.codexAuthIdentity, "acct-current:user-current");
+  assert.deepEqual(loadBrokerSession(cwd), replacement);
+
+  clearBrokerSession(cwd, replacement.instanceId);
+  teardownBrokerSession(replacement);
+});
+
+test("recycles a broker when the workspace account stays but the user changes", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-shared", "user-new");
+  const existing = {
+    status: "ready",
+    instanceId: "auth-stale-user-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7545,
+    codexAuthIdentity: "acct-shared:user-old",
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const replacement = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      waitForBrokerExit: async () => true,
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7546 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 1);
+  assert.equal(spawnCount, 1);
+  assert.equal(replacement.codexAuthIdentity, "acct-shared:user-new");
+
+  clearBrokerSession(cwd, replacement.instanceId);
+  teardownBrokerSession(replacement);
+});
+
+test("persists stopping status before shutting down a stale broker", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const existing = {
+    status: "ready",
+    instanceId: "auth-stale-stopping-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7530,
+    codexAuthIdentity: "acct-previous:user-previous",
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let statusDuringShutdown = null;
+  let spawnCount = 0;
+
+  await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        statusDuringShutdown = loadBrokerSession(cwd)?.status ?? null;
+        return true;
+      },
+      waitForBrokerExit: async () => true,
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7531 };
+      }
+    })
+  );
+
+  assert.equal(statusDuringShutdown, "stopping");
+  assert.equal(spawnCount, 1);
+
+  const replacement = loadBrokerSession(cwd);
+  clearBrokerSession(cwd, replacement.instanceId);
+  teardownBrokerSession(replacement);
+});
+
+test("recycles a stale broker even when it holds active leases", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const existing = {
+    status: "ready",
+    instanceId: "auth-stale-leased-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7540,
+    codexAuthIdentity: "acct-previous:user-previous",
+    leases: [{ sessionId: "job-session", lastSeenAt: Date.now() }]
+  };
+  saveBrokerSession(cwd, existing);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const replacement = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      waitForBrokerExit: async () => true,
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7541 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 1);
+  assert.equal(spawnCount, 1);
+  assert.notEqual(replacement.instanceId, existing.instanceId);
+  assert.deepEqual(replacement.leases, []);
+
+  clearBrokerSession(cwd, replacement.instanceId);
+  teardownBrokerSession(replacement);
+});
+
+test("reuses a live broker logged into the same codex account", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const existing = {
+    status: "ready",
+    instanceId: "auth-fresh-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7510,
+    codexAuthIdentity: "acct-current:user-current",
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const session = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7511 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 0);
+  assert.equal(spawnCount, 0);
+  assert.equal(session.instanceId, existing.instanceId);
+  assert.equal(session.status, "ready");
+  assert.equal(session.codexAuthIdentity, existing.codexAuthIdentity);
+
+  clearBrokerSession(cwd, session.instanceId);
+  teardownBrokerSession(session);
+});
+
+test("reuses a live broker after a token refresh rewrites auth.json", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  const existing = {
+    status: "ready",
+    instanceId: "token-refresh-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7550,
+    codexAuthIdentity: "acct-current:user-current",
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  // A token refresh rewrites auth.json after the broker started, without
+  // changing the logged-in account.
+  writeCodexAuthFile(codexHome, "acct-current", "user-current", Date.now() + 60_000);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const session = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7551 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 0);
+  assert.equal(spawnCount, 0);
+  assert.equal(session.instanceId, existing.instanceId);
+  assert.equal(session.status, "ready");
+  assert.equal(session.codexAuthIdentity, existing.codexAuthIdentity);
+
+  clearBrokerSession(cwd, session.instanceId);
+  teardownBrokerSession(session);
+});
+
+test("treats a legacy session without codexAuthIdentity as stale after a codex login", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const existing = {
+    status: "ready",
+    instanceId: "legacy-started-at-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7520,
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const replacement = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: codexHome },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      waitForBrokerExit: async () => true,
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7521 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 1);
+  assert.equal(spawnCount, 1);
+  assert.notEqual(replacement.instanceId, existing.instanceId);
+  assert.equal(replacement.codexAuthIdentity, "acct-current:user-current");
+
+  clearBrokerSession(cwd, replacement.instanceId);
+  teardownBrokerSession(replacement);
+});
+
+test("keeps reusing a broker when no codex auth file exists", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = makeTempDir();
+  const existing = {
+    status: "ready",
+    instanceId: "logged-out-instance",
+    endpoint: `unix:${path.join(sessionDir, "broker.sock")}`,
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: 7530,
+    leases: []
+  };
+  saveBrokerSession(cwd, existing);
+  let shutdownCount = 0;
+  let spawnCount = 0;
+
+  const session = await ensureBrokerSession(
+    cwd,
+    fakeBrokerOptions({
+      env: { CODEX_HOME: absentCodexHome() },
+      sendBrokerShutdown: async () => {
+        shutdownCount += 1;
+        return true;
+      },
+      spawnBrokerProcess() {
+        spawnCount += 1;
+        return { pid: 7531 };
+      }
+    })
+  );
+
+  assert.equal(shutdownCount, 0);
+  assert.equal(spawnCount, 0);
+  assert.equal(session.instanceId, existing.instanceId);
+  assert.equal(session.status, "ready");
+
+  clearBrokerSession(cwd, session.instanceId);
+  teardownBrokerSession(session);
+});
+
+test("resolves the codex auth file location from CODEX_HOME and HOME", () => {
+  const codexHome = makeTempDir();
+  const customHome = makeTempDir();
+  assert.equal(
+    brokerLifecycle.resolveCodexAuthFile({ CODEX_HOME: codexHome }),
+    path.join(codexHome, "auth.json")
+  );
+  assert.equal(
+    brokerLifecycle.resolveCodexAuthFile({ HOME: customHome }),
+    path.join(customHome, ".codex", "auth.json")
+  );
+  assert.equal(
+    brokerLifecycle.resolveCodexAuthFile({}),
+    path.join(os.homedir(), ".codex", "auth.json")
+  );
+  assert.equal(
+    brokerLifecycle.readCodexAuthIdentity({ CODEX_HOME: absentCodexHome() }),
+    null
+  );
+
+  writeCodexAuthFile(codexHome, "acct-current");
+  assert.equal(
+    brokerLifecycle.readCodexAuthIdentity({ CODEX_HOME: codexHome }),
+    "acct-current:user-current"
+  );
+
+  const authFile = path.join(codexHome, "auth.json");
+  fs.writeFileSync(
+    authFile,
+    `${JSON.stringify({ auth_mode: "api-key", OPENAI_API_KEY: "sk-test" })}\n`,
+    "utf8"
+  );
+  assert.equal(
+    brokerLifecycle.readCodexAuthIdentity({ CODEX_HOME: codexHome }),
+    null
+  );
+});
+
+test("reuse lookup skips brokers whose login changed", () => {
+  const cwd = makeTempDir();
+  const codexHome = path.join(makeTempDir(), "codex-home");
+  writeCodexAuthFile(codexHome, "acct-current");
+  const session = {
+    status: "ready",
+    instanceId: "reuse-stale-instance",
+    endpoint: "unix:/tmp/reuse-stale/broker.sock",
+    codexAuthIdentity: "acct-previous:user-previous",
+    leases: []
+  };
+  saveBrokerSession(cwd, session);
+
+  assert.equal(
+    brokerLifecycle.loadReusableBrokerSession(cwd, { env: { CODEX_HOME: codexHome } }),
+    null
+  );
+  assert.equal(brokerLifecycle.loadReusableBrokerSession(makeTempDir(), {}), null);
+
+  const fresh = { ...session, instanceId: "reuse-fresh-instance", codexAuthIdentity: "acct-current:user-current" };
+  saveBrokerSession(cwd, fresh);
+  assert.deepEqual(
+    brokerLifecycle.loadReusableBrokerSession(cwd, { env: { CODEX_HOME: codexHome } }),
+    fresh
+  );
+});
+
 test("separate processes converge on one broker instance", async (t) => {
   const cwd = makeTempDir();
   const fixtureRoot = makeTempDir();
@@ -567,6 +1036,7 @@ test("separate processes converge on one broker instance", async (t) => {
   const zcodeData = makeTempDir();
   const claudeData = makeTempDir();
   const tempDirs = [makeTempDir(), makeTempDir()];
+  const codexHome = path.join(fixtureRoot, "absent-codex-home");
   const brokerModule = new URL(
     "../plugins/codex/scripts/lib/broker-lifecycle.mjs",
     import.meta.url
@@ -603,6 +1073,7 @@ test("separate processes converge on one broker instance", async (t) => {
       env.TMPDIR = tempDirs[index % tempDirs.length];
       env.TMP = tempDirs[index % tempDirs.length];
       env.TEMP = tempDirs[index % tempDirs.length];
+      env.CODEX_HOME = codexHome;
       return runProcess(
         ["--input-type=module", "-e", source, cwd, fixture.scriptPath],
         { env }

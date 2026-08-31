@@ -982,7 +982,7 @@ export async function getCodexAuthStatus(cwd, options = {}) {
   try {
     client = await CodexAppServerClient.connect(cwd, {
       env: options.env,
-      reuseExistingBroker: true
+      reuseExistingBrokerIfFresh: true
     });
     return await getCodexAuthStatusFromClient(client, cwd);
   } catch (error) {

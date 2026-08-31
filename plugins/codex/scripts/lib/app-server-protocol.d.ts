@@ -55,6 +55,8 @@ export interface CodexAppServerClientOptions {
   brokerInstanceId?: string;
   disableBroker?: boolean;
   reuseExistingBroker?: boolean;
+  /** Reuse a recorded shared broker only while its login matches the codex auth file; never creates one. */
+  reuseExistingBrokerIfFresh?: boolean;
 }
 
 export interface AppServerMethodMap {

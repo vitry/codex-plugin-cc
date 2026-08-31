@@ -39,6 +39,23 @@ function buildSharedBrokerEnv(binDir) {
   };
 }
 
+function writeFakeCodexLogin(codexHome, accountId, userId) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const claims = { "https://api.openai.com/auth": { chatgpt_user_id: userId } };
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexHome, "auth.json"),
+    `${JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        account_id: accountId,
+        id_token: `${encode({ alg: "none" })}.${encode(claims)}.`
+      }
+    })}\n`,
+    "utf8"
+  );
+}
+
 function registerBrokerCleanup(t, cwd, env) {
   t.after(() => {
     if (!loadBrokerSession(cwd)) {
@@ -363,6 +380,7 @@ test("transfer delegates the current Claude session directly to native import", 
     cwd: repo,
     env: {
       ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude",
       HOME: home,
       CODEX_HOME: path.join(home, ".codex"),
       CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
@@ -486,6 +504,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     cwd: repo,
     env: {
       ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude",
       HOME: home,
       CODEX_HOME: path.join(home, ".codex")
     }
@@ -516,6 +535,7 @@ test("transfer reports failures from the native import completion", () => {
     cwd: repo,
     env: {
       ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude",
       HOME: home,
       CODEX_HOME: path.join(home, ".codex")
     }
@@ -542,7 +562,11 @@ test("transfer rejects sources outside the Claude projects directory", () => {
 
   const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
     cwd: repo,
-    env: { ...buildEnv(binDir), HOME: home }
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude",
+      HOME: home
+    }
   });
 
   assert.notEqual(result.status, 0);
@@ -1354,7 +1378,10 @@ test("Claude review --background leaves detachment to the host and returns the f
 
   const launched = run("node", [SCRIPT, "review", "--background", "--json"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude"
+    }
   });
 
   assert.equal(launched.status, 0, launched.stderr);
@@ -2293,7 +2320,10 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
 
   const setup = run("node", [SCRIPT, "setup", "--enable-review-gate", "--json"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude"
+    }
   });
   assert.equal(setup.status, 0, setup.stderr);
   const setupPayload = JSON.parse(setup.stdout);
@@ -2301,13 +2331,19 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
 
   const taskResult = run("node", [SCRIPT, "task", "--write", "fix the issue"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude"
+    }
   });
   assert.equal(taskResult.status, 0, taskResult.stderr);
 
   const blocked = run("node", [STOP_HOOK], {
     cwd: repo,
-    env: buildEnv(binDir),
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude"
+    },
     input: JSON.stringify({
       cwd: repo,
       session_id: "sess-stop-review",
@@ -2330,6 +2366,7 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
     cwd: repo,
     env: {
       ...buildEnv(binDir),
+      CODEX_COMPANION_HOST: "claude",
       CODEX_COMPANION_SESSION_ID: "sess-stop-review"
     }
   });
@@ -2624,6 +2661,53 @@ test("setup reuses an existing shared app-server without starting another one", 
 
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
   assert.equal(fakeState.appServerStarts, 1);
+
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      cwd: repo
+    })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("setup declines a shared broker whose codex login changed", (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const env = buildSharedBrokerEnv(binDir);
+  registerBrokerCleanup(t, repo, env);
+  writeFakeCodexLogin(path.join(binDir, "codex-home"), "acct-a", "user-a");
+
+  const review = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(review.status, 0, review.stderr);
+  assert.ok(loadBrokerSession(repo), "shared-broker coverage requires an active broker");
+  const startsAfterReview = JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).appServerStarts;
+
+  // codex login switches accounts while the shared broker keeps the old one.
+  writeFakeCodexLogin(path.join(binDir, "codex-home"), "acct-b", "user-b");
+
+  const setup = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(setup.status, 0, setup.stderr);
+
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.equal(fakeState.appServerStarts, startsAfterReview + 1);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,

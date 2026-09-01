@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 
-test("createBrokerEndpoint uses Unix sockets on non-Windows platforms", () => {
+test("createBrokerEndpoint uses Unix sockets on non-Windows platforms", { skip: process.platform === "win32" }, () => {
   const endpoint = createBrokerEndpoint("/tmp/cxc-12345", "darwin");
   assert.equal(endpoint, "unix:/tmp/cxc-12345/broker.sock");
   assert.deepEqual(parseBrokerEndpoint(endpoint), {

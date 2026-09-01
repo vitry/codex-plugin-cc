@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { withFileLock } from "./file-lock.mjs";
+import { terminateProcessTree } from "./process.mjs";
 import { resolvePersistentRuntimeDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
@@ -327,6 +328,54 @@ export function clearBrokerSession(cwd, expectedInstanceId = null) {
   return true;
 }
 
+export function resolveCodexAuthFile(env = process.env) {
+  return path.join(
+    env.CODEX_HOME || path.join(env.HOME || os.homedir(), ".codex"),
+    "auth.json"
+  );
+}
+
+function decodeJwtClaims(token) {
+  const encoded = typeof token === "string" ? token.split(".")[1] : null;
+  if (!encoded) {
+    return null;
+  }
+  try {
+    return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readCodexAuthUserId(auth) {
+  // Mirrors codex-rs TokenData: chatgpt_user_id, falling back to user_id.
+  const claims = decodeJwtClaims(auth?.tokens?.id_token);
+  const authClaims = claims?.["https://api.openai.com/auth"];
+  return authClaims?.chatgpt_user_id ?? authClaims?.user_id ?? null;
+}
+
+export function readCodexAuthIdentity(env = process.env) {
+  // Known limitation: with OS-keyring credential storage
+  // (cli_auth_credentials_store = "keyring"/"auto") auth.json does not
+  // reflect the active login, so this check degrades to "never stale".
+  try {
+    const auth = JSON.parse(fs.readFileSync(resolveCodexAuthFile(env), "utf8"));
+    const accountId = auth?.tokens?.account_id;
+    if (typeof accountId !== "string" || !accountId) {
+      return null;
+    }
+    // account_id identifies the workspace and stays the same when users
+    // switch inside one Business/Enterprise workspace, so the id token's
+    // user id is part of the key. An unreadable id token degrades the
+    // comparison to workspace-level detection.
+    const userId = readCodexAuthUserId(auth);
+    return userId ? `${accountId}:${userId}` : `${accountId}:`;
+  } catch {
+    // Missing or unreadable auth state reads as logged out.
+    return null;
+  }
+}
+
 async function isBrokerEndpointReady(
   endpoint,
   instanceId,
@@ -366,6 +415,69 @@ function updateBrokerLease(session, env, now = Date.now()) {
   };
 }
 
+function brokerSessionCodexLoginChanged(session, env = process.env) {
+  const currentIdentity = readCodexAuthIdentity(env);
+  if (currentIdentity === null) {
+    return false;
+  }
+  const sessionIdentity =
+    typeof session.codexAuthIdentity === "string" && session.codexAuthIdentity
+      ? session.codexAuthIdentity
+      : null;
+  return currentIdentity !== sessionIdentity;
+}
+
+// Best-effort lookup for callers that may reuse a shared broker but must
+// never create one (for example auth-status queries). Declines brokers
+// whose login changed; recycling stays the ensure-path's job.
+export function loadReusableBrokerSession(cwd, options = {}) {
+  const existing = loadBrokerSession(cwd);
+  if (!existing) {
+    return null;
+  }
+  if (brokerSessionCodexLoginChanged(existing, options.env ?? process.env)) {
+    return null;
+  }
+  return existing;
+}
+
+async function recycleStaleBrokerSession(cwd, existing, options = {}) {
+  const endpoint = existing.endpoint ?? null;
+  const instanceId = existing.instanceId ?? null;
+  if (!endpoint || !instanceId) {
+    return;
+  }
+  const shutdown = options.sendBrokerShutdown ?? sendBrokerShutdown;
+  const waitExit = options.waitForBrokerExit ?? waitForBrokerExit;
+
+  saveBrokerSession(cwd, { ...existing, status: "stopping" });
+  let exited = false;
+  try {
+    const acknowledged = await shutdown(endpoint, 1000, instanceId);
+    exited = acknowledged ? await waitExit(endpoint, 1000, instanceId) : false;
+  } catch {
+    // Best effort: a wedged broker may outlive this recycle; its idle
+    // self-exit is the remaining backstop because the state file below
+    // no longer references it.
+  }
+  if (
+    !exited &&
+    Number.isFinite(existing.pid) &&
+    readPidFileOwner(existing.pidFile)?.instanceId === instanceId
+  ) {
+    try {
+      terminateProcessTree(existing.pid);
+    } catch {
+      // Ignore missing or already-exited broker processes.
+    }
+  }
+  try {
+    await finalizeBrokerSession(cwd, instanceId);
+  } catch {
+    // Ignore races with a concurrent replacement of the state file.
+  }
+}
+
 export async function ensureBrokerSession(cwd, options = {}) {
   return withFileLock(
     resolveBrokerLock(cwd),
@@ -389,12 +501,18 @@ async function ensureBrokerSessionUnlocked(cwd, options = {}) {
       existing.status === "starting" ? (options.timeoutMs ?? 2000) : 150
     ))
   ) {
-    const leased = updateBrokerLease(
-      { ...existing, status: "ready" },
-      options.env ?? process.env
-    );
-    saveBrokerSession(cwd, leased);
-    return leased;
+    if (!brokerSessionCodexLoginChanged(existing, options.env ?? process.env)) {
+      const leased = updateBrokerLease(
+        { ...existing, status: "ready" },
+        options.env ?? process.env
+      );
+      saveBrokerSession(cwd, leased);
+      return leased;
+    }
+    await recycleStaleBrokerSession(cwd, existing, options);
+    // The in-memory `existing` still carries its pre-recycle status, so the
+    // teardown below runs for a recycled session too. It only removes files
+    // (no kill), which is the cleanup recycle leaves out.
   }
 
   if (existing) {
@@ -433,6 +551,7 @@ async function ensureBrokerSessionUnlocked(cwd, options = {}) {
     logFile,
     sessionDir,
     pid: null,
+    codexAuthIdentity: readCodexAuthIdentity(options.env ?? process.env),
     leases: []
   }, options.env ?? process.env);
   saveBrokerSession(cwd, session);

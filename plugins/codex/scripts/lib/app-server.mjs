@@ -13,7 +13,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
+import { ensureBrokerSession, loadBrokerSession, loadReusableBrokerSession } from "./broker-lifecycle.mjs";
 import { resolveHostClientInfo } from "./host.mjs";
 import { terminateProcessTree } from "./process.mjs";
 
@@ -413,7 +413,21 @@ export class CodexAppServerClient {
       if (brokerEndpoint && !brokerInstanceId) {
         brokerEndpoint = null;
       }
+      if (!brokerEndpoint && options.reuseExistingBrokerIfFresh) {
+        // Auth-status style lookups: reuse only while the broker's login
+        // still matches the codex auth file, and never create a broker.
+        const brokerSession = loadReusableBrokerSession(cwd, { env: options.env });
+        if (
+          typeof brokerSession?.instanceId === "string" &&
+          brokerSession.instanceId
+        ) {
+          brokerEndpoint = brokerSession.endpoint ?? null;
+          brokerInstanceId = brokerSession.instanceId;
+        }
+      }
       if (!brokerEndpoint && options.reuseExistingBroker) {
+        // Interrupt style lookups must reach the recorded broker even when
+        // its login is stale, because the turn being interrupted lives there.
         const brokerSession = loadBrokerSession(cwd);
         if (
           typeof brokerSession?.instanceId === "string" &&
@@ -423,7 +437,11 @@ export class CodexAppServerClient {
           brokerInstanceId = brokerSession.instanceId;
         }
       }
-      if (!brokerEndpoint && !options.reuseExistingBroker) {
+      if (
+        !brokerEndpoint &&
+        !options.reuseExistingBroker &&
+        !options.reuseExistingBrokerIfFresh
+      ) {
         const brokerSession = await ensureBrokerSession(cwd, { env: options.env });
         brokerEndpoint = brokerSession?.endpoint ?? null;
         brokerInstanceId = brokerSession?.instanceId ?? null;
